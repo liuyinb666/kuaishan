@@ -9,7 +9,7 @@ BOT_TOKEN = "8618290364:AAGuIBWTfkGcgiw0mY4kpgW9Ij0hmc49hfw"
 
 CHANNEL_IDS = [
     "@ziwn19",
-    "@ziwn19"
+    ""
 ]
 
 API_URL = "https://pc28.help/api/kj.json?nbr=30"
