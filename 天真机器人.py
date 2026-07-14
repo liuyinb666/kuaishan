@@ -1,7 +1,3 @@
-# tianzhen_bot_free.py
-# 法老破解- 4000+算法库（前2000个）+ 自动推送（无权限限制）
-# 所有人都可使用所有功能
-
 import asyncio
 import json
 import logging
@@ -413,6 +409,8 @@ class TianZhenBot:
         self.all_users = set()
         # 存储每个用户的最后选择模型
         self.user_models = {}
+        # 存储用户最后查看的算法详情消息 {chat_id: (message_id, pred_type)}
+        self.user_detail_messages = {}
 
     # -------- 命令处理 --------
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -428,13 +426,14 @@ class TianZhenBot:
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await update.message.reply_text(
-            f"🌸 **天真预测**\n\n"
+            f"🌸 **2000算法预测**\n\n"
             f"👋 欢迎 {user.first_name}！\n\n"
             f"⚡ 基于 {TOTAL_MODELS} 套算法（前2000个）\n"
             f"📊 最近{HISTORY_LIMIT}期数据分析\n\n"
             f"🔹 点击下方按钮查看预测\n"
             f"🔹 点击算法可查看历史记录\n"
-            f"🔄 数据每{AUTO_REFRESH_INTERVAL}秒自动刷新",
+            f"🔄 数据每{AUTO_REFRESH_INTERVAL}秒自动刷新\n"
+            f"🔄 打开算法详情后，新数据会自动刷新",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -614,12 +613,93 @@ class TianZhenBot:
         await update.message.reply_text(msg, parse_mode='Markdown')
 
     # -------- 算法详情 --------
+    def build_algorithm_detail_message(self, model_id: int, pred_type: str) -> Tuple[str, InlineKeyboardMarkup]:
+        """构建算法详情消息内容"""
+        pred = self.data.get_prediction_for_model(model_id)
+        stats = self.data.model_stats.get(model_id, {})
+        history = self.data.get_model_history(model_id, 20)
+        actual = self.data.get_actual_result()
+        next_period = get_next_period(actual['period']) if actual else '--'
+
+        if pred_type == 'kill':
+            title = f"🔪 **算法{model_id}** 杀组预测"
+            detail = f"杀组：{pred['kill']}"
+            rate_key = 'kill_rate'
+        elif pred_type == 'double':
+            double = get_double_recommend(pred['kill'])
+            title = f"🎲 **算法{model_id}** 双组预测"
+            detail = f"双组：{double[0]}/{double[1]}"
+            rate_key = 'double_rate'
+        elif pred_type == 'size':
+            title = f"📏 **算法{model_id}** 大小预测"
+            detail = f"大小：{pred['size']}"
+            rate_key = 'size_rate'
+        elif pred_type == 'oe':
+            title = f"🔢 **算法{model_id}** 单双预测"
+            detail = f"单双：{pred['oe']}"
+            rate_key = 'oe_rate'
+        else:
+            double = get_double_recommend(pred['kill'])
+            title = f"📊 **算法{model_id}** 组合预测"
+            detail = f"杀组：{pred['kill']} | 双组：{double[0]}/{double[1]}"
+            rate_key = 'kill_rate'
+
+        msg = f"{title}\n"
+        msg += f"【{detail}】"
+        msg += f"胜率{stats.get(rate_key, 0):.1f}% | {stats.get('consecutive', 0)}连中\n\n"
+
+        if history:
+            for h in history[:20]:
+                period = h.get('period', '')
+                if pred_type == 'kill':
+                    kill = h.get('kill', '--')
+                    win = h.get('kill_win', False)
+                    status = '✅' if win else '❌'
+                    msg += f"{period}期 | 杀{kill} | 开{h.get('actual_sum', '')} {status}\n"
+                elif pred_type == 'double':
+                    double = h.get('double', ['--', '--'])
+                    win = h.get('double_win', False)
+                    status = '✅' if win else '❌'
+                    msg += f"{period}期 | {double[0]} {double[1]} | 开{h.get('actual_sum', '')} {status}\n"
+                elif pred_type == 'size':
+                    size = h.get('size', '--')
+                    actual_combo = h.get('actual', '')
+                    win = (size == actual_combo[0]) if actual_combo else False
+                    status = '✅' if win else '❌'
+                    msg += f"{period}期 | 预测{size} | 开{h.get('actual_sum', '')} {status}\n"
+                elif pred_type == 'oe':
+                    oe = h.get('oe', '--')
+                    actual_combo = h.get('actual', '')
+                    win = (oe == actual_combo[1]) if actual_combo else False
+                    status = '✅' if win else '❌'
+                    msg += f"{period}期 | 预测{oe} | 开{h.get('actual_sum', '')} {status}\n"
+                else:
+                    kill = h.get('kill', '--')
+                    double = h.get('double', ['--', '--'])
+                    kill_win = h.get('kill_win', False)
+                    status = '✅' if kill_win else '❌'
+                    msg += f"{period}期 | 杀{kill} {double[0]}/{double[1]} | 开{h.get('actual_sum', '')} {status}\n"
+
+        if pred_type == 'kill':
+            msg += f"{next_period}期 | 杀{pred['kill']} | 待开 ⏳"
+        elif pred_type == 'double':
+            double = get_double_recommend(pred['kill'])
+            msg += f"{next_period}期 | {double[0]} {double[1]} | 待开 ⏳"
+        elif pred_type == 'size':
+            msg += f"{next_period}期 | 预测{pred['size']} | 待开 ⏳"
+        elif pred_type == 'oe':
+            msg += f"{next_period}期 | 预测{pred['oe']} | 待开 ⏳"
+        else:
+            double = get_double_recommend(pred['kill'])
+            msg += f"{next_period}期 | 杀{pred['kill']} {double[0]}/{double[1]} | 待开 ⏳"
+
+        keyboard = [[InlineKeyboardButton("🔙 返回", callback_data="back_to_predict")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        return msg, reply_markup
+
     async def show_algorithm_detail(self, update, model_id: int, pred_type: str, is_callback: bool = True):
         try:
-            if is_callback:
-                chat_id = update.message.chat.id
-            else:
-                chat_id = update.message.chat.id
+            chat_id = update.message.chat.id
 
             self.all_users.add(chat_id)
             self.user_models[chat_id] = model_id  # 记录用户最后选择的模型
@@ -633,9 +713,6 @@ class TianZhenBot:
                 return
 
             pred = self.data.get_prediction_for_model(model_id)
-            stats = self.data.model_stats.get(model_id, {})
-            history = self.data.get_model_history(model_id, 20)
-
             if not pred:
                 msg = "❌ 算法数据异常"
                 if is_callback:
@@ -644,88 +721,17 @@ class TianZhenBot:
                     await update.message.reply_text(msg)
                 return
 
-            actual = self.data.get_actual_result()
-            next_period = get_next_period(actual['period']) if actual else '--'
-
-            if pred_type == 'kill':
-                title = f"🔪 **算法{model_id}** 杀组预测"
-                detail = f"杀组：{pred['kill']}"
-                rate_key = 'kill_rate'
-            elif pred_type == 'double':
-                double = get_double_recommend(pred['kill'])
-                title = f"🎲 **算法{model_id}** 双组预测"
-                detail = f"双组：{double[0]}/{double[1]}"
-                rate_key = 'double_rate'
-            elif pred_type == 'size':
-                title = f"📏 **算法{model_id}** 大小预测"
-                detail = f"大小：{pred['size']}"
-                rate_key = 'size_rate'
-            elif pred_type == 'oe':
-                title = f"🔢 **算法{model_id}** 单双预测"
-                detail = f"单双：{pred['oe']}"
-                rate_key = 'oe_rate'
-            else:
-                double = get_double_recommend(pred['kill'])
-                title = f"📊 **算法{model_id}** 组合预测"
-                detail = f"杀组：{pred['kill']} | 双组：{double[0]}/{double[1]}"
-                rate_key = 'kill_rate'
-
-            msg = f"{title}\n"
-            msg += f"【{detail}】"
-            msg += f"胜率{stats.get(rate_key, 0):.1f}% | {stats.get('consecutive', 0)}连中\n\n"
-
-            if history:
-                for h in history[:20]:
-                    period = h.get('period', '')
-                    if pred_type == 'kill':
-                        kill = h.get('kill', '--')
-                        win = h.get('kill_win', False)
-                        status = '✅' if win else '❌'
-                        msg += f"{period}期 | 杀{kill} | 开{h.get('actual_sum', '')} {status}\n"
-                    elif pred_type == 'double':
-                        double = h.get('double', ['--', '--'])
-                        win = h.get('double_win', False)
-                        status = '✅' if win else '❌'
-                        msg += f"{period}期 | {double[0]} {double[1]} | 开{h.get('actual_sum', '')} {status}\n"
-                    elif pred_type == 'size':
-                        size = h.get('size', '--')
-                        actual_combo = h.get('actual', '')
-                        win = (size == actual_combo[0]) if actual_combo else False
-                        status = '✅' if win else '❌'
-                        msg += f"{period}期 | 预测{size} | 开{h.get('actual_sum', '')} {status}\n"
-                    elif pred_type == 'oe':
-                        oe = h.get('oe', '--')
-                        actual_combo = h.get('actual', '')
-                        win = (oe == actual_combo[1]) if actual_combo else False
-                        status = '✅' if win else '❌'
-                        msg += f"{period}期 | 预测{oe} | 开{h.get('actual_sum', '')} {status}\n"
-                    else:
-                        kill = h.get('kill', '--')
-                        double = h.get('double', ['--', '--'])
-                        kill_win = h.get('kill_win', False)
-                        status = '✅' if kill_win else '❌'
-                        msg += f"{period}期 | 杀{kill} {double[0]}/{double[1]} | 开{h.get('actual_sum', '')} {status}\n"
-
-            if pred_type == 'kill':
-                msg += f"{next_period}期 | 杀{pred['kill']} | 待开 ⏳"
-            elif pred_type == 'double':
-                double = get_double_recommend(pred['kill'])
-                msg += f"{next_period}期 | {double[0]} {double[1]} | 待开 ⏳"
-            elif pred_type == 'size':
-                msg += f"{next_period}期 | 预测{pred['size']} | 待开 ⏳"
-            elif pred_type == 'oe':
-                msg += f"{next_period}期 | 预测{pred['oe']} | 待开 ⏳"
-            else:
-                double = get_double_recommend(pred['kill'])
-                msg += f"{next_period}期 | 杀{pred['kill']} {double[0]}/{double[1]} | 待开 ⏳"
-
-            keyboard = [[InlineKeyboardButton("🔙 返回", callback_data="back_to_predict")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            msg, reply_markup = self.build_algorithm_detail_message(model_id, pred_type)
 
             if is_callback:
-                await update.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+                sent = await update.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+                message_id = sent.message_id
             else:
-                await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+                sent = await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+                message_id = sent.message_id
+
+            # 记录用户最后查看的算法详情消息，用于新数据自动刷新
+            self.user_detail_messages[chat_id] = (message_id, pred_type)
 
         except Exception as e:
             logger.error(f"显示算法详情时出错: {e}")
@@ -740,6 +746,26 @@ class TianZhenBot:
                     await update.message.reply_text(error_msg)
                 except:
                     pass
+
+    # -------- 自动刷新用户详情 --------
+    async def refresh_user_details(self, context: ContextTypes.DEFAULT_TYPE):
+        """检测到新数据后，自动刷新用户打开的算法详情消息"""
+        if not self.user_detail_messages:
+            return
+        for chat_id, (message_id, pred_type) in list(self.user_detail_messages.items()):
+            model_id = self.user_models.get(chat_id, 1)
+            try:
+                msg, reply_markup = self.build_algorithm_detail_message(model_id, pred_type)
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=msg,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+                logger.info(f"🔄 已自动刷新 {chat_id} 的算法{model_id}详情")
+            except Exception as e:
+                logger.warning(f"自动刷新 {chat_id} 的算法详情失败: {e}")
 
     # -------- 自动推送 --------
     async def auto_push(self, context: ContextTypes.DEFAULT_TYPE, force_period: Optional[str] = None):
@@ -761,6 +787,10 @@ class TianZhenBot:
         actual = self.data.get_actual_result()
         if not actual:
             return
+
+        # 先自动刷新用户当前打开的算法详情
+        await self.refresh_user_details(context)
+
         for chat_id in list(self.all_users):
             try:
                 # 获取用户上次选择的模型，若没有则用1
@@ -846,7 +876,7 @@ class TianZhenBot:
                 ]
                 reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
                 await query.edit_message_text(
-                    "🌸 **天真预测**\n\n选择功能：",
+                    "🌸 **预测**\n\n选择功能：",
                     reply_markup=reply_markup,
                     parse_mode='Markdown'
                 )
@@ -1068,7 +1098,7 @@ class TianZhenBot:
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("🌸 法老破解天真预测机器人 v2.0 (无权限限制版)")
+    print("2000算法预测机器人")
     print("=" * 50)
     print(f"📊 算法总数：{TOTAL_MODELS}（前2000个组合）")
     print(f"📊 分析期数：最近{HISTORY_LIMIT}期")
