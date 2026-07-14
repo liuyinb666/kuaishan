@@ -29,6 +29,7 @@ FIELD_NUMBERS = 'opencode'
 FIELD_TIME = 'opentime'
 HISTORY_LIMIT = 20
 ALGORITHM_COUNT = 2000
+AUTO_REFRESH_INTERVAL = 30  # 自动刷新间隔（秒）
 
 # ============ 日志 ============
 logging.basicConfig(
@@ -142,7 +143,8 @@ class JND28Data:
         self.prediction_history: Dict[int, List] = {}
         self.current_model: int = 1
         self._loading = False
-        self.last_period: str = ""
+        self.last_period: Optional[str] = None
+        self.last_pushed_period: Optional[str] = None
         self.last_prediction: Optional[Dict] = None
         
     def fetch_data(self) -> bool:
@@ -390,6 +392,11 @@ class JND28Data:
         if not self.raw_data:
             return None
         current = self.raw_data[0].get(FIELD_PERIOD, '')
+        # 首次初始化，不触发推送
+        if self.last_period is None:
+            self.last_period = current
+            self.last_prediction = get_prediction(self.current_model, self.raw_data)
+            return None
         if current != self.last_period:
             self.last_period = current
             self.last_prediction = get_prediction(self.current_model, self.raw_data)
@@ -426,7 +433,8 @@ class TianZhenBot:
             f"⚡ 基于 {TOTAL_MODELS} 套算法（前2000个）\n"
             f"📊 最近{HISTORY_LIMIT}期数据分析\n\n"
             f"🔹 点击下方按钮查看预测\n"
-            f"🔹 点击算法可查看历史记录",
+            f"🔹 点击算法可查看历史记录\n"
+            f"🔄 数据每{AUTO_REFRESH_INTERVAL}秒自动刷新",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -597,6 +605,7 @@ class TianZhenBot:
             f"✅ 活跃算法：{active}\n"
             f"📈 历史期数：{len(self.data.raw_data)}\n"
             f"📊 分析期数：最近{HISTORY_LIMIT}期\n"
+            f"🔄 自动刷新：每{AUTO_REFRESH_INTERVAL}秒\n"
             f"📅 更新：{self.data.last_update.strftime('%Y-%m-%d %H:%M:%S') if self.data.last_update else '--'}\n"
         )
         if actual:
@@ -733,12 +742,18 @@ class TianZhenBot:
                     pass
 
     # -------- 自动推送 --------
-    async def auto_push(self, context: ContextTypes.DEFAULT_TYPE):
+    async def auto_push(self, context: ContextTypes.DEFAULT_TYPE, force_period: Optional[str] = None):
         if not self.data.raw_data:
             return
-        new_period = self.data.check_new_period()
+        new_period = force_period
         if not new_period:
+            new_period = self.data.check_new_period()
+            if not new_period:
+                return
+        # 避免重复推送同一期
+        if self.data.last_pushed_period == new_period:
             return
+        self.data.last_pushed_period = new_period
         if not self.all_users:
             logger.info("无用户，跳过推送")
             return
@@ -1024,12 +1039,13 @@ class TianZhenBot:
         old_period = self.data.last_period
         if self.data.fetch_data():
             new_period = self.data.last_period
-            if new_period and new_period != old_period:
+            if new_period and new_period != old_period and old_period is not None:
                 logger.info(f"📢 检测到新期号: {new_period}")
                 pred = self.data.get_prediction_for_model(self.data.current_model)
                 if pred:
                     self.data.last_prediction = pred
                     logger.info(f"📤 新期号 {new_period} 预测已更新")
+                await self.auto_push(context, new_period)
 
     # -------- 运行 --------
     def run(self):
@@ -1041,9 +1057,8 @@ class TianZhenBot:
 
         job_queue = self.app.job_queue
         if job_queue:
-            job_queue.run_repeating(self.auto_update, interval=30, first=10)
-            job_queue.run_repeating(self.auto_push, interval=35, first=15)
-            job_queue.run_repeating(lambda ctx: self.data.fetch_data(), interval=60, first=5)
+            job_queue.run_repeating(self.auto_update, interval=AUTO_REFRESH_INTERVAL, first=10)
+            job_queue.run_repeating(self.auto_push, interval=AUTO_REFRESH_INTERVAL, first=15)
 
         logger.info("📡 加载数据...")
         self.data.fetch_data()
