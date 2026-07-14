@@ -1,3 +1,7 @@
+# tianzhen_bot_free.py
+# 法老破解- 4000+算法库（前2000个）+ 自动推送（无权限限制）
+# 所有人都可使用所有功能
+
 import asyncio
 import json
 import logging
@@ -71,13 +75,29 @@ def get_next_period(cur_period: str) -> str:
 
 # ============ 算法生成 ============
 def generate_algorithm_expressions(count: int = 2000) -> List[str]:
+    """生成多样化的算法表达式（加减、abs、乘法、混合加权）"""
+    templates = [
+        lambda i, j, k: f"n{i}+n{j}+n{k}",
+        lambda i, j, k: f"n{i}-n{j}+n{k}",
+        lambda i, j, k: f"n{i}+n{j}-n{k}",
+        lambda i, j, k: f"abs(n{i}-n{j})+n{k}",
+        lambda i, j, k: f"abs(n{i}-n{j})-n{k}",
+        lambda i, j, k: f"(n{i}*n{j}+n{k})",
+        lambda i, j, k: f"(n{i}*n{j}-n{k})",
+        lambda i, j, k: f"(n{i}+n{j})*n{k}",
+        lambda i, j, k: f"(n{i}-n{j})*n{k}",
+        lambda i, j, k: f"n{i}+n{j}*2+n{k}",
+        lambda i, j, k: f"n{i}*2+n{j}+n{k}",
+        lambda i, j, k: f"n{i}+n{j}+n{k}*2",
+    ]
     expressions = []
-    for i in range(1, 40):
-        for j in range(i, 40):
-            for k in range(j, 40):
-                expressions.append(f"n{i}+n{j}+n{k}")
-                if len(expressions) >= count:
-                    return expressions
+    for i in range(1, 30):
+        for j in range(1, 30):
+            for k in range(1, 30):
+                for template in templates:
+                    expressions.append(template(i, j, k))
+                    if len(expressions) >= count:
+                        return expressions
     return expressions
 
 ALGORITHM_EXPRESSIONS = generate_algorithm_expressions(ALGORITHM_COUNT)
@@ -106,7 +126,7 @@ def evaluate_expression(expr: str, history: List[Dict]) -> Dict:
     
     try:
         expr_eval = re.sub(r'n(\d+)', replace_n, expr)
-        result = eval(expr_eval, {"__builtins__": {}}, {})
+        result = eval(expr_eval, {"__builtins__": {}}, {"abs": abs})
     except:
         result = 13
     
@@ -239,9 +259,13 @@ class JND28Data:
                     'oe_win': 0, 'double_win': 0,
                     'consecutive': 0, 'kill_rate': 0, 
                     'size_rate': 0, 'oe_rate': 0, 'double_rate': 0,
+                    'recent5_kill_rate': 0, 'recent10_kill_rate': 0,
+                    'recent5_double_rate': 0, 'recent10_double_rate': 0,
                 }
             else:
-                for key in ['total', 'kill_win', 'size_win', 'oe_win', 'double_win', 'consecutive']:
+                for key in ['total', 'kill_win', 'size_win', 'oe_win', 'double_win', 'consecutive',
+                            'recent5_kill_rate', 'recent10_kill_rate',
+                            'recent5_double_rate', 'recent10_double_rate']:
                     self.model_stats[m][key] = 0
             self.prediction_history[m] = []
         for i in range(max_check):
@@ -292,14 +316,28 @@ class JND28Data:
                 self.model_stats[m]['size_rate'] = self.model_stats[m]['size_win'] / total * 100
                 self.model_stats[m]['oe_rate'] = self.model_stats[m]['oe_win'] / total * 100
                 self.model_stats[m]['double_rate'] = self.model_stats[m]['double_win'] / total * 100
+            # 计算近期加权胜率
+            history = self.prediction_history.get(m, [])
+            for window, key in [(5, 'recent5'), (10, 'recent10')]:
+                recent = history[-window:]
+                if recent:
+                    kill_wins = sum(1 for h in recent if h.get('kill_win', False))
+                    double_wins = sum(1 for h in recent if h.get('double_win', False))
+                    self.model_stats[m][f'{key}_kill_rate'] = kill_wins / len(recent) * 100
+                    self.model_stats[m][f'{key}_double_rate'] = double_wins / len(recent) * 100
         if self.raw_data:
             self.last_prediction = get_prediction(self.current_model, self.raw_data)
     
     # ---------- 排行榜方法 ----------
     def get_top_kill_rate(self, limit: int = 15) -> List[Tuple[int, float, int]]:
-        stats = [(m, s['kill_rate'], s['consecutive']) 
-                 for m, s in self.model_stats.items() if s.get('total', 0) > 0]
-        return sorted(stats, key=lambda x: x[1], reverse=True)[:limit]
+        # 综合得分：近期5期胜率权重60% + 总体胜率权重40%
+        stats = []
+        for m, s in self.model_stats.items():
+            if s.get('total', 0) > 0:
+                score = s.get('recent5_kill_rate', 0) * 0.6 + s.get('kill_rate', 0) * 0.4
+                stats.append((m, score, s['consecutive'], s['kill_rate']))
+        stats = sorted(stats, key=lambda x: (x[1], x[3]), reverse=True)[:limit]
+        return [(m, kill_rate, consec) for m, score, consec, kill_rate in stats]
     
     def get_top_kill_consecutive(self, limit: int = 15) -> List[Tuple[int, int, float]]:
         stats = [(m, s['consecutive'], s['kill_rate']) 
@@ -321,8 +359,14 @@ class JND28Data:
         return sorted(stats, key=lambda x: x[1], reverse=True)[:limit]
     
     def get_top_double_rate(self, limit: int = 15) -> List[Tuple[int, float]]:
-        stats = [(m, s['double_rate']) for m, s in self.model_stats.items() if s.get('total', 0) > 0]
-        return sorted(stats, key=lambda x: x[1], reverse=True)[:limit]
+        # 综合得分：近期5期双组胜率权重60% + 总体双组胜率权重40%
+        stats = []
+        for m, s in self.model_stats.items():
+            if s.get('total', 0) > 0:
+                score = s.get('recent5_double_rate', 0) * 0.6 + s.get('double_rate', 0) * 0.4
+                stats.append((m, score, s['double_rate']))
+        stats = sorted(stats, key=lambda x: x[1], reverse=True)[:limit]
+        return [(m, double_rate) for m, score, double_rate in stats]
     
     def get_top_double_consecutive(self, limit: int = 15) -> List[Tuple[int, int, float]]:
         stats = []
@@ -426,9 +470,9 @@ class TianZhenBot:
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await update.message.reply_text(
-            f"🌸 **2000算法预测**\n\n"
+            f"🌸 **天真预测**\n\n"
             f"👋 欢迎 {user.first_name}！\n\n"
-            f"⚡ 基于 {TOTAL_MODELS} 套算法（前2000个）\n"
+            f"⚡ 基于 {TOTAL_MODELS} 套混合算法（近期+总体加权排序）\n"
             f"📊 最近{HISTORY_LIMIT}期数据分析\n\n"
             f"🔹 点击下方按钮查看预测\n"
             f"🔹 点击算法可查看历史记录\n"
@@ -600,7 +644,7 @@ class TianZhenBot:
         msg = (
             f"🤖 **系统状态**\n\n"
             f"🌸 天真预测 v2.0（无限制版）\n"
-            f"📊 算法总数：{TOTAL_MODELS}\n"
+            f"📊 算法总数：{TOTAL_MODELS}（多运算符混合）\n"
             f"✅ 活跃算法：{active}\n"
             f"📈 历史期数：{len(self.data.raw_data)}\n"
             f"📊 分析期数：最近{HISTORY_LIMIT}期\n"
@@ -876,7 +920,7 @@ class TianZhenBot:
                 ]
                 reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
                 await query.edit_message_text(
-                    "🌸 **预测**\n\n选择功能：",
+                    "🌸 **天真预测**\n\n选择功能：",
                     reply_markup=reply_markup,
                     parse_mode='Markdown'
                 )
@@ -1098,7 +1142,7 @@ class TianZhenBot:
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("2000算法预测机器人")
+    print("🌸 法老破解天真预测机器人 v2.0 (无权限限制版)")
     print("=" * 50)
     print(f"📊 算法总数：{TOTAL_MODELS}（前2000个组合）")
     print(f"📊 分析期数：最近{HISTORY_LIMIT}期")
