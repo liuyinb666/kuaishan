@@ -24,7 +24,7 @@ from telegram.ext import (
 
 # ============ 配置 ============
 TOKEN = "8723628059:AAEICW5iWSoueLZP-pzjp7ytOuyKST7lU70"
-API_URL = "https://super.pc28998.com/history/JND28?limit=50"
+API_URL = "https://pc28.help/api/kj.json?nbr=50"
 FIELD_PERIOD = 'expect'
 FIELD_NUMBERS = 'opencode'
 FIELD_TIME = 'opentime'
@@ -452,7 +452,7 @@ class TianZhenBot:
             [KeyboardButton("🔪 杀组预测"), KeyboardButton("🎲 双组预测")],
             [KeyboardButton("📏 大小预测"), KeyboardButton("🔢 单双预测")],
             [KeyboardButton("📊 组合预测"), KeyboardButton("🏆 排行榜")],
-            [KeyboardButton("ℹ️ 状态"), KeyboardButton("🔄 刷新数据")]
+            [KeyboardButton("ℹ️ 状态")]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await update.message.reply_text(
@@ -472,24 +472,15 @@ class TianZhenBot:
         await self.start(update, context)
 
     # -------- 预测功能（无权限检查） --------
-    async def refresh_data(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        chat_id = update.effective_chat.id
-        self.all_users.add(chat_id)
-        await update.message.reply_text("🔄 正在刷新数据...")
-        if self.data.fetch_data():
-            await update.message.reply_text(f"✅ 数据刷新成功！共 {len(self.data.raw_data)} 期")
-        else:
-            await update.message.reply_text("❌ 数据刷新失败，请稍后重试")
-
     async def kill_predict(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         self.all_users.add(chat_id)
         if not self.data.raw_data:
-            await update.message.reply_text("⏳ 数据加载中，请点击「🔄 刷新数据」重试")
+            await update.message.reply_text("⏳ 数据加载中，请稍等自动刷新...")
             return
         top_list = self.data.get_top_kill_rate(15)
         if not top_list:
-            await update.message.reply_text("暂无数据，请点击「🔄 刷新数据」")
+            await update.message.reply_text("暂无数据，请稍等自动刷新...")
             return
         actual = self.data.get_actual_result()
         next_period = get_next_period(actual['period']) if actual else '--'
@@ -508,11 +499,11 @@ class TianZhenBot:
         chat_id = update.effective_chat.id
         self.all_users.add(chat_id)
         if not self.data.raw_data:
-            await update.message.reply_text("⏳ 数据加载中，请点击「🔄 刷新数据」重试")
+            await update.message.reply_text("⏳ 数据加载中，请稍等自动刷新...")
             return
         top_list = self.data.get_top_double_rate(15)
         if not top_list:
-            await update.message.reply_text("暂无数据，请点击「🔄 刷新数据」")
+            await update.message.reply_text("暂无数据，请稍等自动刷新...")
             return
         actual = self.data.get_actual_result()
         next_period = get_next_period(actual['period']) if actual else '--'
@@ -532,11 +523,11 @@ class TianZhenBot:
         chat_id = update.effective_chat.id
         self.all_users.add(chat_id)
         if not self.data.raw_data:
-            await update.message.reply_text("⏳ 数据加载中，请点击「🔄 刷新数据」重试")
+            await update.message.reply_text("⏳ 数据加载中，请稍等自动刷新...")
             return
         top_list = self.data.get_top_size(15)
         if not top_list:
-            await update.message.reply_text("暂无数据，请点击「🔄 刷新数据」")
+            await update.message.reply_text("暂无数据，请稍等自动刷新...")
             return
         actual = self.data.get_actual_result()
         next_period = get_next_period(actual['period']) if actual else '--'
@@ -555,11 +546,11 @@ class TianZhenBot:
         chat_id = update.effective_chat.id
         self.all_users.add(chat_id)
         if not self.data.raw_data:
-            await update.message.reply_text("⏳ 数据加载中，请点击「🔄 刷新数据」重试")
+            await update.message.reply_text("⏳ 数据加载中，请稍等自动刷新...")
             return
         top_list = self.data.get_top_oe(15)
         if not top_list:
-            await update.message.reply_text("暂无数据，请点击「🔄 刷新数据」")
+            await update.message.reply_text("暂无数据，请稍等自动刷新...")
             return
         actual = self.data.get_actual_result()
         next_period = get_next_period(actual['period']) if actual else '--'
@@ -578,11 +569,11 @@ class TianZhenBot:
         chat_id = update.effective_chat.id
         self.all_users.add(chat_id)
         if not self.data.raw_data:
-            await update.message.reply_text("⏳ 数据加载中，请点击「🔄 刷新数据」重试")
+            await update.message.reply_text("⏳ 数据加载中，请稍等自动刷新...")
             return
         top_list = self.data.get_top_kill_rate(5)
         if not top_list:
-            await update.message.reply_text("暂无数据，请点击「🔄 刷新数据」")
+            await update.message.reply_text("暂无数据，请稍等自动刷新...")
             return
         actual = self.data.get_actual_result()
         next_period = get_next_period(actual['period']) if actual else '--'
@@ -603,7 +594,7 @@ class TianZhenBot:
         chat_id = update.effective_chat.id
         self.all_users.add(chat_id)
         if not self.data.raw_data:
-            await update.message.reply_text("⏳ 数据加载中，请点击「🔄 刷新数据」重试")
+            await update.message.reply_text("⏳ 数据加载中，请稍等自动刷新...")
             return
         keyboard = [
             [InlineKeyboardButton("🔪 杀组排行", callback_data="rank_kill_menu")],
@@ -623,7 +614,7 @@ class TianZhenBot:
         chat_id = update.effective_chat.id
         self.all_users.add(chat_id)
         if not self.data.raw_data:
-            await update.message.reply_text("⏳ 数据加载中，请点击「🔄 刷新数据」")
+            await update.message.reply_text("⏳ 数据加载中，请稍等自动刷新...")
             return
         actual = self.data.get_actual_result()
         active = sum(1 for s in self.data.model_stats.values() if s.get('total', 0) > 0)
@@ -735,7 +726,7 @@ class TianZhenBot:
             self.user_models[chat_id] = model_id  # 记录用户最后选择的模型
 
             if not self.data.raw_data:
-                msg = "⏳ 数据加载中，请点击「🔄 刷新数据」重试"
+                msg = "⏳ 数据加载中，请稍等自动刷新..."
                 if is_callback:
                     await update.edit_message_text(msg)
                 else:
@@ -864,8 +855,6 @@ class TianZhenBot:
             await self.rank_menu(update, context)
         elif text == "ℹ️ 状态":
             await self.show_status(update, context)
-        elif text == "🔄 刷新数据":
-            await self.refresh_data(update, context)
         elif text.isdigit() and 1 <= int(text) <= TOTAL_MODELS:
             model_id = int(text)
             self.user_models[chat_id] = model_id
@@ -902,7 +891,7 @@ class TianZhenBot:
                     [KeyboardButton("🔪 杀组预测"), KeyboardButton("🎲 双组预测")],
                     [KeyboardButton("📏 大小预测"), KeyboardButton("🔢 单双预测")],
                     [KeyboardButton("📊 组合预测"), KeyboardButton("🏆 排行榜")],
-                    [KeyboardButton("ℹ️ 状态"), KeyboardButton("🔄 刷新数据")]
+                    [KeyboardButton("ℹ️ 状态")]
                 ]
                 reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
                 await query.edit_message_text(
@@ -967,7 +956,7 @@ class TianZhenBot:
                     [KeyboardButton("🔪 杀组预测"), KeyboardButton("🎲 双组预测")],
                     [KeyboardButton("📏 大小预测"), KeyboardButton("🔢 单双预测")],
                     [KeyboardButton("📊 组合预测"), KeyboardButton("🏆 排行榜")],
-                    [KeyboardButton("ℹ️ 状态"), KeyboardButton("🔄 刷新数据")]
+                    [KeyboardButton("ℹ️ 状态")]
                 ]
                 reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
                 await query.edit_message_text(
@@ -1118,7 +1107,6 @@ class TianZhenBot:
         job_queue = self.app.job_queue
         if job_queue:
             job_queue.run_repeating(self.auto_update, interval=AUTO_REFRESH_INTERVAL, first=10)
-            job_queue.run_repeating(self.auto_push, interval=AUTO_REFRESH_INTERVAL, first=15)
 
         logger.info("📡 加载数据...")
         self.data.fetch_data()
