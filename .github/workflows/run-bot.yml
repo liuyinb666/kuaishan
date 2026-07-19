@@ -1,0 +1,33 @@
+name: Run PC28 Bot
+
+on:
+  # 方式1：手动触发（推荐，点一下按钮就运行）
+  workflow_dispatch:
+  # 方式2：定时触发（比如每小时跑一次，但会重复启动）
+  # schedule:
+  #   - cron: '0 */6 * * *'  # 每6小时触发一次（但会被6小时限制卡死，不建议）
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 设置超时为6小时（360分钟）
+    
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+      
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+      
+      - name: 运行机器人
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          ADMIN_ID: ${{ secrets.ADMIN_ID }}
+        run: python bot.py
