@@ -1,13 +1,14 @@
-name: Run PC28 Bot
+name: PC28 定时预测
 
 on:
+  schedule:
+    - cron: '*/10 * * * *'   # 每10分钟执行一次
   workflow_dispatch:
 
 jobs:
-  run-bot:
+  predict:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -15,10 +16,10 @@ jobs:
           python-version: '3.10'
       - name: 安装依赖
         run: pip install -r requirements.txt
-      - name: 运行机器人
+      - name: 运行预测
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          ADMIN_ID: ${{ secrets.ADMIN_ID }}
+          TARGET_USER_ID: ${{ secrets.ADMIN_ID }}
         run: python bot.py
