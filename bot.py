@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -312,7 +311,7 @@ async def async_claim_balance_core(client, channel_id):
     except Exception:
         return "❌ 运行过程中发生未知网络异常，请稍后重试。", None
 
-# ==================== 核心倍投任务引擎（带3分钟封盘延迟检测 & 授权撤销熔断） ====================
+# ==================== 核心倍投任务引擎（已修复 group_entity 顺序） ====================
 def run_double_bet_loop(user_id, cancel_event):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -351,7 +350,19 @@ def run_double_bet_loop(user_id, cancel_event):
                 update_user_config(user_id, status='idle')
                 return
             
-            # 获取当前实际起始余额
+            # --- 修复点：先获取游戏群实体，再查询余额 ---
+            await client.get_dialogs()
+            try:
+                group_entity = await client.get_input_entity(game_group_id)
+            except Exception:
+                try:
+                    group_entity = await client.get_input_entity(int(game_group_id))
+                except Exception:
+                    bot.send_message(user_id, "❌ 无法解析指定的游戏群。请检查参数并确保账号已加入该群组。")
+                    update_user_config(user_id, status='idle')
+                    return
+            
+            # --- 现在使用 group_entity 查询余额 ---
             current_balance = await async_check_balance_core(client, group_entity)
             if current_balance is None:
                 bot.send_message(user_id, "⚠️ 无法获取当前钱包余额，投注将尝试继续。")
@@ -374,17 +385,7 @@ def run_double_bet_loop(user_id, cancel_event):
             )
             bot.send_message(ADMIN_ID, start_admin_msg, parse_mode="Markdown")
             
-            await client.get_dialogs()
-            try:
-                group_entity = await client.get_input_entity(game_group_id)
-            except Exception:
-                try:
-                    group_entity = await client.get_input_entity(int(game_group_id))
-                except Exception:
-                    bot.send_message(user_id, "❌ 无法解析指定的游戏群。请检查参数并确保账号已加入该群组。")
-                    update_user_config(user_id, status='idle')
-                    return
-            
+            # 注意：此时 group_entity 已经定义，且已使用，后续的 while 循环中不再重复获取
             current_bet = start_bet
             end_reason = "异常中止"  # 默认结束反馈原因
             
@@ -550,7 +551,7 @@ def run_double_bet_loop(user_id, cancel_event):
                 await asyncio.sleep(5)
                 
             bot.send_message(user_id, "🏁 倍投运行结束。正在计算当前账户最终余额...")
-            final_balance = await async_check_balance_core(client)
+            final_balance = await async_check_balance_core(client, group_entity)
             if final_balance is not None:
                 bot.send_message(user_id, f"ℹ️ 当前账户最终总结余为: *{final_balance} KKCOIN*", parse_mode="Markdown")
             else:
@@ -1242,4 +1243,3 @@ if __name__ == '__main__':
         bot.infinity_polling(timeout=60, long_polling_timeout=30)
     except Exception as err:
         logger.error(f"Telebot 崩溃重启中: {err}")
-
