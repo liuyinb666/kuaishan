@@ -246,8 +246,8 @@ async def async_check_balance_core(client, target_entity):
         await client.get_dialogs()
         # 向指定群发送"余额"指令
         await client.send_message(target_entity, '余额')
-        # 等待机器人回复，若回复较慢可酌情增加延时
-        await asyncio.sleep(4)
+        # 等待机器人回复，缩短至1.5秒以减少阻塞
+        await asyncio.sleep(1.5)
 
         # 抓取最近10条消息，遍历查找包含"KKCOIN"的回复
         messages = await client.get_messages(target_entity, limit=10)
@@ -311,7 +311,7 @@ async def async_claim_balance_core(client, channel_id):
     except Exception:
         return "❌ 运行过程中发生未知网络异常，请稍后重试。", None
 
-# ==================== 核心倍投任务引擎（已修复 group_entity 顺序） ====================
+# ==================== 核心倍投任务引擎（已优化：缩短查询等待，扩大消息抓取范围） ====================
 def run_double_bet_loop(user_id, cancel_event):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -391,7 +391,8 @@ def run_double_bet_loop(user_id, cancel_event):
             
             while not cancel_event.is_set():
                 try:
-                    history = await client.get_messages(group_entity, limit=5)
+                    # 增大limit至30，确保关键消息不被刷走
+                    history = await client.get_messages(group_entity, limit=30)
                 except Exception as e:
                     logger.error(f"获取群消息异常: {e}")
                     await asyncio.sleep(5)
@@ -408,7 +409,7 @@ def run_double_bet_loop(user_id, cancel_event):
                     await asyncio.sleep(5)
                     continue
                 
-                # 下注前余额红线与止盈检测
+                # 下注前余额红线与止盈检测（缩短查询等待已在async_check_balance_core中优化）
                 balance_check = await async_check_balance_core(client, group_entity)
                 if balance_check is not None:
                     current_balance = balance_check
@@ -448,9 +449,9 @@ def run_double_bet_loop(user_id, cancel_event):
                 await asyncio.sleep(5)
                 
                 is_frozen = False
-                # 检查最近的 3 条消息
+                # 检查最近的 30 条消息
                 try:
-                    chk_history = await client.get_messages(group_entity, limit=3)
+                    chk_history = await client.get_messages(group_entity, limit=30)
                     for msg in chk_history:
                         if msg.message and "已经封盘" in msg.message:
                             is_frozen = True
@@ -468,7 +469,7 @@ def run_double_bet_loop(user_id, cancel_event):
                         if cancel_event.is_set():
                             break
                         try:
-                            detect_history = await client.get_messages(group_entity, limit=5)
+                            detect_history = await client.get_messages(group_entity, limit=30)
                             for dm in detect_history:
                                 if dm.message and "在游戏过程中如果更改机器人权限则本局游戏直接判负" in dm.message:
                                     wait_success = True
@@ -490,7 +491,7 @@ def run_double_bet_loop(user_id, cancel_event):
                 # 正常情况：抓取开奖期号
                 period_id = None
                 for _ in range(5):
-                    chk_history = await client.get_messages(group_entity, limit=5)
+                    chk_history = await client.get_messages(group_entity, limit=30)
                     for msg in chk_history:
                         if msg.message and "期号:" in msg.message:
                             match = re.search(r'期号\s*:\s*([a-zA-Z0-9]+)', msg.message)
@@ -509,7 +510,7 @@ def run_double_bet_loop(user_id, cancel_event):
                         break
                     
                     try:
-                        res_history = await client.get_messages(group_entity, limit=5)
+                        res_history = await client.get_messages(group_entity, limit=30)
                     except Exception as e:
                         logger.error(f"获取开奖历史消息异常: {e}")
                         continue
