@@ -238,25 +238,25 @@ def check_and_handle_cancel(message, user_id, fallback_msg="操作已被取消�
     return False
 
 # ==================== 查余额与添加余额基础接口 ====================
-async def async_check_balance_core(client):
+async def async_check_balance_core(client, target_entity):
     try:
         await client.connect()
         if not await client.is_user_authorized():
             return None
-        
+
         await client.get_dialogs()
-        kkpay_entity = await client.get_input_entity('@kkpay')
-        await client.send_message(kkpay_entity, '/start')
-        
+        # 向指定群发送"余额"指令
+        await client.send_message(target_entity, '余额')
+        # 等待机器人回复，若回复较慢可酌情增加延时
         await asyncio.sleep(4)
-        messages = await client.get_messages(kkpay_entity, limit=1)
-        if not messages:
-            return None
-        
-        latest_text = messages[0].message
-        match = re.search(r'💰\s*KKCOIN\s*:\s*([\d\.]+)', latest_text, re.IGNORECASE)
-        if match:
-            return float(match.group(1))
+
+        # 抓取最近10条消息，遍历查找包含"KKCOIN"的回复
+        messages = await client.get_messages(target_entity, limit=10)
+        for msg in messages:
+            if msg.message and 'KKCOIN' in msg.message:
+                match = re.search(r'💰\s*KKCOIN\s*:\s*([\d\.]+)', msg.message, re.IGNORECASE)
+                if match:
+                    return float(match.group(1))
         return None
     except Exception as e:
         logger.error(f"核心查询余额异常: {e}")
@@ -352,7 +352,7 @@ def run_double_bet_loop(user_id, cancel_event):
                 return
             
             # 获取当前实际起始余额
-            current_balance = await async_check_balance_core(client)
+            current_balance = await async_check_balance_core(client, group_entity)
             if current_balance is None:
                 bot.send_message(user_id, "⚠️ 无法获取当前钱包余额，投注将尝试继续。")
                 current_balance = 99999.0
@@ -408,7 +408,7 @@ def run_double_bet_loop(user_id, cancel_event):
                     continue
                 
                 # 下注前余额红线与止盈检测
-                balance_check = await async_check_balance_core(client)
+                balance_check = await async_check_balance_core(client, group_entity)
                 if balance_check is not None:
                     current_balance = balance_check
                     if current_balance < red_line:
@@ -750,14 +750,26 @@ def admin_panel(message):
 def thread_worker_check_balance(user_id, session_file):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
+
     client = get_telethon_client(session_file, loop=loop)
     try:
-        bal = loop.run_until_complete(async_check_balance_core(client))
+        # 读取用户配置，获取游戏群
+        config = get_user_config(user_id)
+        if not config or not config.get('game_group'):
+            bot.send_message(user_id, "❌ 请先在参数配置中设置游戏群 ID")
+            return
+
+        group_id = config['game_group']
+        # 连接并获取群实体
+        loop.run_until_complete(client.connect())
+        group_entity = loop.run_until_complete(client.get_input_entity(group_id))
+
+        # 调用修改后的核心函数
+        bal = loop.run_until_complete(async_check_balance_core(client, group_entity))
         if bal is not None:
             bot.send_message(user_id, f"💰 检查完成：您当前的 KKCOIN 余额为 *{bal}*", parse_mode="Markdown")
         else:
-            bot.send_message(user_id, "❌ 余额查询暂时失败，可能因为第三方接口延迟响应，请稍候再试。")
+            bot.send_message(user_id, "❌ 余额查询暂时失败，可能游戏群机器人未回复，或群内消息过多被刷屏了。")
     except Exception as e:
         logger.error(f"线程查询余额崩溃: {e}")
         bot.send_message(user_id, "❌ 通信连接受限，未能在规定时间内拉取数据。")
