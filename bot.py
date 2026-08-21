@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 # 固定登录参数
 API_ID = int(os.environ.get('API_ID', 2040))
 API_HASH = os.environ.get('API_HASH', "b18441a1ff607e10a989891a5462e627")
-DEVICE_MODEL = "Satellite A665D"
+DEVICE_MODEL = "吱吱吱"
 SYSTEM_VERSION = "Windows 10"
-APP_VERSION = "3.4.3 x64"
+APP_VERSION = "快三倍投"
 SYSTEM_LANG_CODE = "en-US"
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN', "")
@@ -311,7 +311,7 @@ async def async_claim_balance_core(client, channel_id):
     except Exception:
         return "❌ 运行过程中发生未知网络异常，请稍后重试。", None
 
-# ==================== 核心倍投任务引擎（已优化：缩短查询等待，扩大消息抓取范围） ====================
+# ==================== 核心倍投任务引擎（所有get_messages统一limit=5） ====================
 def run_double_bet_loop(user_id, cancel_event):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -350,7 +350,7 @@ def run_double_bet_loop(user_id, cancel_event):
                 update_user_config(user_id, status='idle')
                 return
             
-            # --- 修复点：先获取游戏群实体，再查询余额 ---
+            # --- 先获取游戏群实体 ---
             await client.get_dialogs()
             try:
                 group_entity = await client.get_input_entity(game_group_id)
@@ -362,7 +362,7 @@ def run_double_bet_loop(user_id, cancel_event):
                     update_user_config(user_id, status='idle')
                     return
             
-            # --- 现在使用 group_entity 查询余额 ---
+            # --- 查询起始余额 ---
             current_balance = await async_check_balance_core(client, group_entity)
             if current_balance is None:
                 bot.send_message(user_id, "⚠️ 无法获取当前钱包余额，投注将尝试继续。")
@@ -374,7 +374,7 @@ def run_double_bet_loop(user_id, cancel_event):
                     update_user_config(user_id, status='idle')
                     return
             
-            # 🚀 1. 开始时发送给管理员反馈
+            # 🚀 开始反馈给管理员
             start_admin_msg = (
                 "📈 *[倍投启动反馈]*\n"
                 f"👤 用户昵称: {nickname}\n"
@@ -385,14 +385,13 @@ def run_double_bet_loop(user_id, cancel_event):
             )
             bot.send_message(ADMIN_ID, start_admin_msg, parse_mode="Markdown")
             
-            # 注意：此时 group_entity 已经定义，且已使用，后续的 while 循环中不再重复获取
             current_bet = start_bet
-            end_reason = "异常中止"  # 默认结束反馈原因
+            end_reason = "异常中止"
             
             while not cancel_event.is_set():
+                # ----- 可下注检测：抓取最近5条 -----
                 try:
-                    # 增大limit至30，确保关键消息不被刷走
-                    history = await client.get_messages(group_entity, limit=30)
+                    history = await client.get_messages(group_entity, limit=5)
                 except Exception as e:
                     logger.error(f"获取群消息异常: {e}")
                     await asyncio.sleep(5)
@@ -409,7 +408,7 @@ def run_double_bet_loop(user_id, cancel_event):
                     await asyncio.sleep(5)
                     continue
                 
-                # 下注前余额红线与止盈检测（缩短查询等待已在async_check_balance_core中优化）
+                # 余额红线与止盈检测
                 balance_check = await async_check_balance_core(client, group_entity)
                 if balance_check is not None:
                     current_balance = balance_check
@@ -426,11 +425,10 @@ def run_double_bet_loop(user_id, cancel_event):
                         end_reason = "达到盈利"
                         break
                 
-                # 🛠️ 改造点1：合并下注。将 ds 和 xd 合并在同条消息中发送，并使用换行符分隔。
+                # 合并下注指令
                 bet_msg_text = f"ds{int(current_bet)}\nxd{int(current_bet)}"
                 logger.info(f"正在合并下注发送 (换行格式):\n{bet_msg_text}")
                 
-                # 🛠️ 改造点3：捕获因被撤销授权、限制发送引发的异常并执行熔断
                 try:
                     await client.send_message(group_entity, bet_msg_text)
                 except (UserDeactivatedError, AuthKeyDuplicatedError) as auth_err:
@@ -445,13 +443,12 @@ def run_double_bet_loop(user_id, cancel_event):
                     await asyncio.sleep(5)
                     continue
 
-                # 🛠️ 改造点2：投注完5秒后进行封盘检测与3分钟循环监听
+                # ----- 封盘检测：只查最近5条 -----
                 await asyncio.sleep(5)
                 
                 is_frozen = False
-                # 检查最近的 30 条消息
                 try:
-                    chk_history = await client.get_messages(group_entity, limit=30)
+                    chk_history = await client.get_messages(group_entity, limit=5)
                     for msg in chk_history:
                         if msg.message and "已经封盘" in msg.message:
                             is_frozen = True
@@ -463,13 +460,13 @@ def run_double_bet_loop(user_id, cancel_event):
                     bot.send_message(user_id, "⚠️ 检测到当前已封盘，本次投注失败！系统将每10秒检测一次，等待下一次投注开始...")
                     
                     wait_success = False
-                    # 开启最长 3分钟(180秒) 的每 10 秒检测循环，等待下一次投注提示重新开始
-                    for _ in range(18): # 18 * 10秒 = 180秒
+                    # 等待新一轮：每10秒检测，最多3分钟，抓取最近5条
+                    for _ in range(18):
                         await asyncio.sleep(10)
                         if cancel_event.is_set():
                             break
                         try:
-                            detect_history = await client.get_messages(group_entity, limit=30)
+                            detect_history = await client.get_messages(group_entity, limit=5)
                             for dm in detect_history:
                                 if dm.message and "在游戏过程中如果更改机器人权限则本局游戏直接判负" in dm.message:
                                     wait_success = True
@@ -486,12 +483,12 @@ def run_double_bet_loop(user_id, cancel_event):
                         break
                     else:
                         bot.send_message(user_id, "🟢 新的一轮已经开始，正在重新切入下注流程...")
-                        continue  # 重新开始下注循环
+                        continue
                 
-                # 正常情况：抓取开奖期号
+                # ----- 抓取期号（5条） -----
                 period_id = None
                 for _ in range(5):
-                    chk_history = await client.get_messages(group_entity, limit=30)
+                    chk_history = await client.get_messages(group_entity, limit=5)
                     for msg in chk_history:
                         if msg.message and "期号:" in msg.message:
                             match = re.search(r'期号\s*:\s*([a-zA-Z0-9]+)', msg.message)
@@ -502,15 +499,15 @@ def run_double_bet_loop(user_id, cancel_event):
                         break
                     await asyncio.sleep(2)
                 
-                # 静默开奖抓取（延长至 3 分钟监听：18次 * 10秒）
+                # ----- 开奖结果监听（5条） -----
                 round_result = None
-                for attempt in range(1, 19): # 180 秒监听
+                for attempt in range(1, 19):
                     await asyncio.sleep(10)
                     if cancel_event.is_set():
                         break
                     
                     try:
-                        res_history = await client.get_messages(group_entity, limit=30)
+                        res_history = await client.get_messages(group_entity, limit=5)
                     except Exception as e:
                         logger.error(f"获取开奖历史消息异常: {e}")
                         continue
@@ -541,7 +538,7 @@ def run_double_bet_loop(user_id, cancel_event):
                     end_reason = "开奖超时"
                     break
                 
-                # 结算与翻倍机制
+                # 结算与翻倍
                 if round_result == 'win':
                     bot.send_message(user_id, f"🎉 *本局获胜*。下注金额重置回到初始设置: *{start_bet} KKCOIN*", parse_mode="Markdown")
                     current_bet = start_bet
@@ -558,7 +555,6 @@ def run_double_bet_loop(user_id, cancel_event):
             else:
                 bot.send_message(user_id, "ℹ️ 连接暂时受限，未能返回最终的钱包具体结存，系统已完成退出。")
             
-            # 🚀 2. 结束时发送给管理员反馈
             end_admin_msg = (
                 "📉 *[倍投结束反馈]*\n"
                 f"👤 用户昵称: {nickname}\n"
@@ -755,18 +751,15 @@ def thread_worker_check_balance(user_id, session_file):
 
     client = get_telethon_client(session_file, loop=loop)
     try:
-        # 读取用户配置，获取游戏群
         config = get_user_config(user_id)
         if not config or not config.get('game_group'):
             bot.send_message(user_id, "❌ 请先在参数配置中设置游戏群 ID")
             return
 
         group_id = config['game_group']
-        # 连接并获取群实体
         loop.run_until_complete(client.connect())
         group_entity = loop.run_until_complete(client.get_input_entity(group_id))
 
-        # 调用修改后的核心函数
         bal = loop.run_until_complete(async_check_balance_core(client, group_entity))
         if bal is not None:
             bot.send_message(user_id, f"💰 检查完成：您当前的 KKCOIN 余额为 *{bal}*", parse_mode="Markdown")
@@ -1041,7 +1034,6 @@ def process_phone_input(message):
     session_file_path = f"sessions/{user_id}.session"
     os.makedirs("sessions", exist_ok=True)
     
-    # 临时记录，等待完全激活
     update_user_config(user_id, status='login_code')
     
     bot.send_message(user_id, "📡 正在与 Telegram 建立安全连接并请求发送验证码，请稍候...", reply_markup=remove_kb)
@@ -1117,7 +1109,6 @@ def async_login_verify_code(user_id, phone, code, phone_code_hash, session_path)
             loop.run_until_complete(client.sign_in(phone, code, phone_code_hash=phone_code_hash))
             
             if loop.run_until_complete(client.is_user_authorized()):
-                # 只有在此成功激活后，才正式将 phone 写入 users 配置表，纳入协议激活名单！
                 update_user_config(user_id, phone=phone, session_file=session_path, status='idle')
                 bot.send_message(user_id, "🎉 授权激活成功！您的 Telegram 协议账号已正式挂载至本系统。", reply_markup=build_user_keyboard(user_id))
                 
@@ -1181,7 +1172,6 @@ def async_login_verify_2fa(user_id, password_2fa, session_path):
                 phone = row[0] if row else None
                 conn.close()
                 
-                # 2FA 校验成功后才正式写入名单
                 update_user_config(user_id, phone=phone, session_file=session_path, status='idle')
                 bot.send_message(user_id, "🎉 2FA 激活校验成功！账号协议已安全挂载。", reply_markup=build_user_keyboard(user_id))
                 
