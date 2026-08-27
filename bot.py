@@ -4,17 +4,14 @@ import json
 import asyncio
 import logging
 import threading
-import random
-import gradio as gr
-from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict, Any
+from typing import List, Dict
 import aiohttp
 import uvicorn
 from fastapi import FastAPI
 from telethon import TelegramClient, events, Button
 from telethon.errors import SessionPasswordNeededError, PhoneCodeExpiredError, PhoneCodeInvalidError
 
-# ==================== 常量与工具函数 ====================
+# ==================== 环境变量 ====================
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -22,7 +19,6 @@ API_URL = "https://yu28.top/api/kj.json?nbr=100"
 API_KEY = "yu28_0889c78ad74725b7"
 SESSIONS_DIR = "telegram_sessions"
 USER_DATA_DIR = "user_data"
-BEIJING_TZ = timezone(timedelta(hours=8))
 
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 os.makedirs(USER_DATA_DIR, exist_ok=True)
@@ -30,7 +26,7 @@ os.makedirs(USER_DATA_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ==================== 杀组预测算法（移植自 HTML，修复 mulberry32） ====================
+# ==================== 杀组预测算法 ====================
 ALL_TYPES = ['小双', '小单', '大双', '大单']
 SEQUENCES = [
     [0, 3, 9, 12, 15, 18, 21, 24, 27],
@@ -58,7 +54,6 @@ def get_type_from_sum(sum_val: int) -> str:
     return size + parity
 
 def mulberry32(seed: int):
-    """32位种子随机数生成器（Python兼容版，修复 >>> 运算符）"""
     s = seed & 0xFFFFFFFF
     def next_():
         nonlocal s
@@ -81,31 +76,29 @@ def is_same_sequence(num1: int, num2: int) -> bool:
     seq2 = get_sequence_indexes(num2)
     return any(i in seq2 for i in seq1)
 
-def split_and_sum(num: float) -> int:
-    s = str(num).replace('.', '')
+def split_and_sum_str(s: str) -> int:
+    s = s.replace('.', '')
     return sum(int(c) for c in s)
 
-def predict_next_period(current_expect: str, current_sum: int, current_type: str,
-                        range_min: float = 0.25, range_max: float = 0.55) -> str:
-    seed_match = re.search(r'\d+', current_expect)
-    seed = int(seed_match.group()) if seed_match else hash(current_expect) & 0xFFFFFFFF
+def predict_next_period(current_expect: str, current_sum: int, range_min: float = 0.25, range_max: float = 0.55) -> str:
+    match = re.search(r'\d+', current_expect)
+    seed = int(match.group()) if match else hash(current_expect) & 0xFFFFFFFF
     rnd = mulberry32(seed)
 
     random_num = rnd() * (range_max - range_min) + range_min
     product = random_num * current_sum
     rounded = round(product, 3)
-    final_sum = split_and_sum(rounded)
+    final_sum = split_and_sum_str(str(rounded))
     final_type = get_type_from_sum(final_sum)
 
     rand_str = f"{random_num:.8f}".split('.')[1]
     rand_first_three = rand_str[:3]
-    rand_sum = split_and_sum(int(rand_first_three))
+    rand_sum = split_and_sum_str(rand_first_three)
     same_seq = is_same_sequence(rand_sum, current_sum)
 
     rule_key = 'sameSequence' if same_seq else 'diffSequence'
     predict_groups = COMBINATION_RULES[rule_key][final_type]
-    kill_group = next(t for t in ALL_TYPES if t not in predict_groups)
-    return kill_group
+    return next(t for t in ALL_TYPES if t not in predict_groups)
 
 def generate_range_pool():
     pool = []
@@ -135,7 +128,7 @@ class KillGroupPredictor:
             for i in range(max_test):
                 target = history[i]
                 prev = history[i + 1]
-                kill = predict_next_period(prev['issue'], prev['sum'], prev['type'], rmin, rmax)
+                kill = predict_next_period(prev['issue'], prev['sum'], rmin, rmax)
                 if target['type'] != kill:
                     hits += 1
             if hits > best_hits:
@@ -143,9 +136,7 @@ class KillGroupPredictor:
                 best_range = (rmin, rmax)
 
         latest = history[0]
-        kill = predict_next_period(latest['issue'], latest['sum'], latest['type'],
-                                   best_range[0], best_range[1])
-        return kill
+        return predict_next_period(latest['issue'], latest['sum'], best_range[0], best_range[1])
 
 # ==================== 数据抓取 ====================
 class DataFetcher:
@@ -178,7 +169,7 @@ class DataFetcher:
         return None
 
     @staticmethod
-    def parse_history(raw_data: list) -> list[dict]:
+    def parse_history(raw_data: list) -> List[dict]:
         parsed = []
         for item in raw_data:
             try:
@@ -251,7 +242,8 @@ class UserState:
         self.broadcast_count = 0
         self.broadcast_history = []
         self.broadcast_sent_issues = []
-        self.broadcast_last_issue = ""
+        self.broadcast_last_issue = ""      # 上次播报的期号（即已发送预测的期号）
+        self.last_processed_issue = ""      # 上次处理的开奖期号（用于去重）
         self.history = []
 
         self.load()
@@ -273,6 +265,7 @@ class UserState:
                         self.broadcast_history = data.get("broadcast_history", [])
                         self.broadcast_sent_issues = data.get("broadcast_sent_issues", [])
                         self.broadcast_last_issue = data.get("broadcast_last_issue", "")
+                        self.last_processed_issue = data.get("last_processed_issue", "")
                         self.history = data.get("history", [])
                 except Exception as e:
                     logger.error(f"加载用户 {self.user_id} 档案出错: {e}")
@@ -294,6 +287,7 @@ class UserState:
                         "broadcast_history": self.broadcast_history,
                         "broadcast_sent_issues": self.broadcast_sent_issues,
                         "broadcast_last_issue": self.broadcast_last_issue,
+                        "last_processed_issue": self.last_processed_issue,
                         "history": self.history
                     }, f, ensure_ascii=False)
             except Exception as e:
@@ -304,6 +298,7 @@ class UserState:
         self.broadcast_count = 0
         self.broadcast_sent_issues = []
         self.broadcast_last_issue = ""
+        self.last_processed_issue = ""
 
     async def try_reconnect(self):
         session_path = os.path.join(SESSIONS_DIR, f"user_{self.user_id}")
@@ -367,9 +362,20 @@ class SystemOrchestrator:
                         pass
 
     async def do_broadcast(self, u: UserState, data: dict):
+        """
+        根据当前开奖数据 data，更新上一期结果，并生成下一期预测发送。
+        必须保证同一期只处理一次，使用 last_processed_issue 去重。
+        """
         if not u.broadcast_enabled or not u.broadcast_channel or not u.client:
             return
 
+        current_issue = data['issue']
+        # 如果已处理过这一期，直接跳过
+        if u.last_processed_issue == current_issue:
+            logger.debug(f"[用户 {u.user_id}] 期号 {current_issue} 已处理过，跳过")
+            return
+
+        # 达到最大期数则自动关闭
         if u.broadcast_max_periods > 0 and u.broadcast_count >= u.broadcast_max_periods:
             u.broadcast_enabled = False
             u.save()
@@ -379,12 +385,15 @@ class SystemOrchestrator:
                 pass
             return
 
+        # 更新上一期结果（如果历史中有上一条记录，且它还没有 actual）
         if u.broadcast_history:
             last_rec = u.broadcast_history[-1]
-            last_rec['actual'] = data['combination']
-            last_rec['sum'] = data['total']
+            if last_rec.get('actual') is None:
+                last_rec['actual'] = data['combination']
+                last_rec['sum'] = data['total']
 
-        next_qihao = get_next_qihao(data['issue'])
+        # 生成下一期预测
+        next_qihao = get_next_qihao(current_issue)
         rec = {'qihao': next_qihao, 'sum': data['total']}
         try:
             kill_target = KillGroupPredictor.predict_kill(u.history)
@@ -398,16 +407,20 @@ class SystemOrchestrator:
             u.broadcast_history = u.broadcast_history[-20:]
 
         msg = build_broadcast_message(u.broadcast_title, u.broadcast_history, max_records=10)
+
+        # 延迟发送
         if u.custom_delay > 0:
             await asyncio.sleep(u.custom_delay)
+
         try:
             await u.client.send_message(u.broadcast_channel, msg)
             u.broadcast_count += 1
-            u.broadcast_sent_issues.append(data['issue'])
+            u.broadcast_sent_issues.append(current_issue)
             u.broadcast_sent_issues = u.broadcast_sent_issues[-200:]
-            u.broadcast_last_issue = data['issue']
+            u.broadcast_last_issue = current_issue   # 记录本次处理的开奖期号（即刚处理的期）
+            u.last_processed_issue = current_issue   # 标记已处理
             u.save()
-            logger.info(f"[用户 {u.user_id}] 播报 {next_qihao}，累计 {u.broadcast_count} 期")
+            logger.info(f"[用户 {u.user_id}] 播报下一期 {next_qihao}，基于期号 {current_issue}，累计 {u.broadcast_count} 期")
         except Exception as e:
             logger.error(f"播报发送失败: {e}")
 
@@ -456,12 +469,19 @@ class SystemOrchestrator:
             if data == "toggle_broadcast":
                 u.broadcast_enabled = not u.broadcast_enabled
                 if u.broadcast_enabled:
+                    # 清空历史，重新开始
                     u.reset_broadcast_history()
-                    if u.is_logged_in and u.broadcast_channel:
-                        latest = await DataFetcher.fetch_latest()
-                        if latest and latest['issue'] != u.broadcast_last_issue:
-                            u.history = DataFetcher.parse_history(await DataFetcher.fetch_history_list())
-                            await self.do_broadcast(u, latest)
+                    # 获取最新开奖数据
+                    latest = await DataFetcher.fetch_latest()
+                    if latest:
+                        # 填充历史数据
+                        full = await DataFetcher.fetch_history_list()
+                        if full:
+                            u.history = DataFetcher.parse_history(full)
+                        # 立即处理最新一期（生成下一期预测并发送）
+                        await self.do_broadcast(u, latest)
+                    else:
+                        await event.answer("暂时无法获取开奖数据，请稍后重试", alert=True)
                 u.save()
                 await event.edit("报数设置", buttons=self.broadcast_settings_keyboard(u))
                 return
@@ -588,14 +608,17 @@ class SystemOrchestrator:
         while True:
             try:
                 data = await DataFetcher.fetch_latest()
-                if data and data['issue'] != self.last_issue_id:
-                    self.last_issue_id = data['issue']
-                    for uid, u in self.users.items():
-                        if u.is_logged_in and u.broadcast_enabled:
-                            full = await DataFetcher.fetch_history_list()
-                            if full:
-                                u.history = DataFetcher.parse_history(full)
-                            await self.do_broadcast(u, data)
+                if data:
+                    issue = data['issue']
+                    if issue != self.last_issue_id:
+                        self.last_issue_id = issue
+                        # 更新所有用户的历史数据并处理新期
+                        full = await DataFetcher.fetch_history_list()
+                        for uid, u in self.users.items():
+                            if u.is_logged_in and u.broadcast_enabled:
+                                if full:
+                                    u.history = DataFetcher.parse_history(full)
+                                await self.do_broadcast(u, data)
             except Exception as e:
                 logger.error(f"轮询异常: {e}")
             await asyncio.sleep(4)
@@ -607,6 +630,7 @@ class SystemOrchestrator:
         await self.bot.start(bot_token=BOT_TOKEN)
         await self.register_handlers()
         await self.load_existing_users()
+        # 预填充历史
         initial = await DataFetcher.fetch_history_list()
         if initial:
             parsed = DataFetcher.parse_history(initial)
@@ -618,7 +642,7 @@ class SystemOrchestrator:
         asyncio.create_task(self.poll_api())
         await self.bot.run_until_disconnected()
 
-# ==================== FastAPI + Gradio ====================
+# ==================== FastAPI + 轻量控制台 ====================
 def start_bot_thread():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -635,13 +659,6 @@ app = FastAPI(title="PC28 报数机器人")
 @app.get("/ping")
 def health_check():
     return {"status": "ok", "service": "broadcast_only"}
-
-with gr.Blocks(title="PC28 报数机器人控制台") as demo:
-    gr.Markdown("# 📢 PC28 报数机器人")
-    gr.Markdown("仅保留报数功能，采用区间优化算法，每期自动选择最优区间预测杀组。")
-    gr.Markdown("开启报数时自动清空历史，从当前最新一期开始。历史记录最多保留20期。")
-    gr.Markdown("---")
-    gr.Markdown("请通过 Telegram Bot 交互控制。")
 
 if __name__ == "__main__":
     threading.Thread(target=start_bot_thread, daemon=True).start()
