@@ -406,7 +406,7 @@ class SystemOrchestrator:
         if len(u.broadcast_history) > 20:
             u.broadcast_history = u.broadcast_history[-20:]
 
-        msg = build_broadcast_message(u.broadcast_title, u.broadcast_history, max_records=10)
+        msg = build_broadcast_message(u.broadcast_title, u.broadcast_history, max_records=20)
 
         # 延迟发送
         if u.custom_delay > 0:
