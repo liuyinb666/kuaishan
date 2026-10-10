@@ -34,15 +34,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # 固定登录参数
-API_ID = 2040
-API_HASH = "b18441a1ff607e10a989891a5462e627"
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 DEVICE_MODEL = "Satellite A665D"
 SYSTEM_VERSION = "Windows 10"
 APP_VERSION = "3.4.3 x64"
 SYSTEM_LANG_CODE = "en-US"
 
-ADMIN_ID = 
-BOT_TOKEN = ""  
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
