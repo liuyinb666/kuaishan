@@ -1,4 +1,4 @@
-pyTelegramBotAPI
-telethon
-python-socks[asyncio]
-pysocks
+pyTelegramBotAPI==4.14.0
+telethon==1.33.1
+python-socks[asyncio]==2.4.3
+pysocks==1.7.1
