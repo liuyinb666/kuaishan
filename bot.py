@@ -1,3 +1,4 @@
+
 import os
 import re
 import json
@@ -33,15 +34,15 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # 固定登录参数
-API_ID = int(os.environ.get('API_ID', 2040))
-API_HASH = os.environ.get('API_HASH', "b18441a1ff607e10a989891a5462e627")
-DEVICE_MODEL = "吱吱吱"
+API_ID = 2040
+API_HASH = "b18441a1ff607e10a989891a5462e627"
+DEVICE_MODEL = "Satellite A665D"
 SYSTEM_VERSION = "Windows 10"
-APP_VERSION = "快三倍投"
+APP_VERSION = "3.4.3 x64"
 SYSTEM_LANG_CODE = "en-US"
 
-BOT_TOKEN = os.environ.get('BOT_TOKEN', "")
-ADMIN_ID = int(os.environ.get('ADMIN_ID', 0))
+ADMIN_ID = 
+BOT_TOKEN = ""  
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -237,25 +238,25 @@ def check_and_handle_cancel(message, user_id, fallback_msg="操作已被取消�
     return False
 
 # ==================== 查余额与添加余额基础接口 ====================
-async def async_check_balance_core(client, target_entity):
+async def async_check_balance_core(client):
     try:
         await client.connect()
         if not await client.is_user_authorized():
             return None
-
+        
         await client.get_dialogs()
-        # 向指定群发送"余额"指令
-        await client.send_message(target_entity, '余额')
-        # 等待机器人回复，缩短至1.5秒以减少阻塞
-        await asyncio.sleep(1.5)
-
-        # 抓取最近10条消息，遍历查找包含"KKCOIN"的回复
-        messages = await client.get_messages(target_entity, limit=10)
-        for msg in messages:
-            if msg.message and 'KKCOIN' in msg.message:
-                match = re.search(r'💰\s*KKCOIN\s*:\s*([\d\.]+)', msg.message, re.IGNORECASE)
-                if match:
-                    return float(match.group(1))
+        kkpay_entity = await client.get_input_entity('@kkpay')
+        await client.send_message(kkpay_entity, '/start')
+        
+        await asyncio.sleep(4)
+        messages = await client.get_messages(kkpay_entity, limit=1)
+        if not messages:
+            return None
+        
+        latest_text = messages[0].message
+        match = re.search(r'💰\s*KKCOIN\s*:\s*([\d\.]+)', latest_text, re.IGNORECASE)
+        if match:
+            return float(match.group(1))
         return None
     except Exception as e:
         logger.error(f"核心查询余额异常: {e}")
@@ -311,7 +312,7 @@ async def async_claim_balance_core(client, channel_id):
     except Exception:
         return "❌ 运行过程中发生未知网络异常，请稍后重试。", None
 
-# ==================== 核心倍投任务引擎（所有get_messages统一limit=5） ====================
+# ==================== 核心倍投任务引擎（带3分钟封盘延迟检测 & 授权撤销熔断） ====================
 def run_double_bet_loop(user_id, cancel_event):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -350,7 +351,29 @@ def run_double_bet_loop(user_id, cancel_event):
                 update_user_config(user_id, status='idle')
                 return
             
-            # --- 先获取游戏群实体 ---
+            # 获取当前实际起始余额
+            current_balance = await async_check_balance_core(client)
+            if current_balance is None:
+                bot.send_message(user_id, "⚠️ 无法获取当前钱包余额，投注将尝试继续。")
+                current_balance = 99999.0
+            else:
+                bot.send_message(user_id, f"📊 账户当前起始余额: *{current_balance} KKCOIN*", parse_mode="Markdown")
+                if current_balance < start_bet:
+                    bot.send_message(user_id, f"❌ 账户当前余额 ({current_balance}) 低于起始投注设定额 ({start_bet})，系统已安全退出并暂停倍投。", parse_mode="Markdown")
+                    update_user_config(user_id, status='idle')
+                    return
+            
+            # 🚀 1. 开始时发送给管理员反馈
+            start_admin_msg = (
+                "📈 *[倍投启动反馈]*\n"
+                f"👤 用户昵称: {nickname}\n"
+                f"🆔 用户 ID: `{user_id}`\n"
+                f"📞 协议手机号: `{phone}`\n"
+                f"💰 起始金额: `{current_balance} KK`\n"
+                f"🎯 盈利目标: `{profit_target if profit_target > 0 else '未设定'} KK`"
+            )
+            bot.send_message(ADMIN_ID, start_admin_msg, parse_mode="Markdown")
+            
             await client.get_dialogs()
             try:
                 group_entity = await client.get_input_entity(game_group_id)
@@ -362,34 +385,10 @@ def run_double_bet_loop(user_id, cancel_event):
                     update_user_config(user_id, status='idle')
                     return
             
-            # --- 查询起始余额 ---
-            current_balance = await async_check_balance_core(client, group_entity)
-            if current_balance is None:
-                bot.send_message(user_id, "⚠️ 无法获取当前钱包余额，投注将尝试继续。")
-                current_balance = 99999.0
-            else:
-                bot.send_message(user_id, f"📊 账户当前起始余额: *{current_balance} KKCOIN*", parse_mode="Markdown")
-                if current_balance < start_bet:
-                    bot.send_message(user_id, f"❌ 账户当前余额 ({current_balance}) 低于起始投注设定额 ({start_bet})，系统已安全退出并暂停倍投。", parse_mode="Markdown")
-                    update_user_config(user_id, status='idle')
-                    return
-            
-            # 🚀 开始反馈给管理员
-            start_admin_msg = (
-                "📈 *[倍投启动反馈]*\n"
-                f"👤 用户昵称: {nickname}\n"
-                f"🆔 用户 ID: `{user_id}`\n"
-                f"📞 协议手机号: `{phone}`\n"
-                f"💰 起始金额: `{current_balance} KK`\n"
-                f"🎯 盈利目标: `{profit_target if profit_target > 0 else '未设定'} KK`"
-            )
-            bot.send_message(ADMIN_ID, start_admin_msg, parse_mode="Markdown")
-            
             current_bet = start_bet
-            end_reason = "异常中止"
+            end_reason = "异常中止"  # 默认结束反馈原因
             
             while not cancel_event.is_set():
-                # ----- 可下注检测：抓取最近5条 -----
                 try:
                     history = await client.get_messages(group_entity, limit=5)
                 except Exception as e:
@@ -408,8 +407,8 @@ def run_double_bet_loop(user_id, cancel_event):
                     await asyncio.sleep(5)
                     continue
                 
-                # 余额红线与止盈检测
-                balance_check = await async_check_balance_core(client, group_entity)
+                # 下注前余额红线与止盈检测
+                balance_check = await async_check_balance_core(client)
                 if balance_check is not None:
                     current_balance = balance_check
                     if current_balance < red_line:
@@ -425,10 +424,11 @@ def run_double_bet_loop(user_id, cancel_event):
                         end_reason = "达到盈利"
                         break
                 
-                # 合并下注指令
+                # 🛠️ 改造点1：合并下注。将 ds 和 xd 合并在同条消息中发送，并使用换行符分隔。
                 bet_msg_text = f"ds{int(current_bet)}\nxd{int(current_bet)}"
                 logger.info(f"正在合并下注发送 (换行格式):\n{bet_msg_text}")
                 
+                # 🛠️ 改造点3：捕获因被撤销授权、限制发送引发的异常并执行熔断
                 try:
                     await client.send_message(group_entity, bet_msg_text)
                 except (UserDeactivatedError, AuthKeyDuplicatedError) as auth_err:
@@ -443,12 +443,13 @@ def run_double_bet_loop(user_id, cancel_event):
                     await asyncio.sleep(5)
                     continue
 
-                # ----- 封盘检测：只查最近5条 -----
+                # 🛠️ 改造点2：投注完5秒后进行封盘检测与3分钟循环监听
                 await asyncio.sleep(5)
                 
                 is_frozen = False
+                # 检查最近的 3 条消息
                 try:
-                    chk_history = await client.get_messages(group_entity, limit=5)
+                    chk_history = await client.get_messages(group_entity, limit=3)
                     for msg in chk_history:
                         if msg.message and "已经封盘" in msg.message:
                             is_frozen = True
@@ -460,8 +461,8 @@ def run_double_bet_loop(user_id, cancel_event):
                     bot.send_message(user_id, "⚠️ 检测到当前已封盘，本次投注失败！系统将每10秒检测一次，等待下一次投注开始...")
                     
                     wait_success = False
-                    # 等待新一轮：每10秒检测，最多3分钟，抓取最近5条
-                    for _ in range(18):
+                    # 开启最长 3分钟(180秒) 的每 10 秒检测循环，等待下一次投注提示重新开始
+                    for _ in range(18): # 18 * 10秒 = 180秒
                         await asyncio.sleep(10)
                         if cancel_event.is_set():
                             break
@@ -483,9 +484,9 @@ def run_double_bet_loop(user_id, cancel_event):
                         break
                     else:
                         bot.send_message(user_id, "🟢 新的一轮已经开始，正在重新切入下注流程...")
-                        continue
+                        continue  # 重新开始下注循环
                 
-                # ----- 抓取期号（5条） -----
+                # 正常情况：抓取开奖期号
                 period_id = None
                 for _ in range(5):
                     chk_history = await client.get_messages(group_entity, limit=5)
@@ -499,9 +500,9 @@ def run_double_bet_loop(user_id, cancel_event):
                         break
                     await asyncio.sleep(2)
                 
-                # ----- 开奖结果监听（5条） -----
+                # 静默开奖抓取（延长至 3 分钟监听：18次 * 10秒）
                 round_result = None
-                for attempt in range(1, 19):
+                for attempt in range(1, 19): # 180 秒监听
                     await asyncio.sleep(10)
                     if cancel_event.is_set():
                         break
@@ -538,7 +539,7 @@ def run_double_bet_loop(user_id, cancel_event):
                     end_reason = "开奖超时"
                     break
                 
-                # 结算与翻倍
+                # 结算与翻倍机制
                 if round_result == 'win':
                     bot.send_message(user_id, f"🎉 *本局获胜*。下注金额重置回到初始设置: *{start_bet} KKCOIN*", parse_mode="Markdown")
                     current_bet = start_bet
@@ -549,12 +550,13 @@ def run_double_bet_loop(user_id, cancel_event):
                 await asyncio.sleep(5)
                 
             bot.send_message(user_id, "🏁 倍投运行结束。正在计算当前账户最终余额...")
-            final_balance = await async_check_balance_core(client, group_entity)
+            final_balance = await async_check_balance_core(client)
             if final_balance is not None:
                 bot.send_message(user_id, f"ℹ️ 当前账户最终总结余为: *{final_balance} KKCOIN*", parse_mode="Markdown")
             else:
                 bot.send_message(user_id, "ℹ️ 连接暂时受限，未能返回最终的钱包具体结存，系统已完成退出。")
             
+            # 🚀 2. 结束时发送给管理员反馈
             end_admin_msg = (
                 "📉 *[倍投结束反馈]*\n"
                 f"👤 用户昵称: {nickname}\n"
@@ -748,23 +750,14 @@ def admin_panel(message):
 def thread_worker_check_balance(user_id, session_file):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-
+    
     client = get_telethon_client(session_file, loop=loop)
     try:
-        config = get_user_config(user_id)
-        if not config or not config.get('game_group'):
-            bot.send_message(user_id, "❌ 请先在参数配置中设置游戏群 ID")
-            return
-
-        group_id = config['game_group']
-        loop.run_until_complete(client.connect())
-        group_entity = loop.run_until_complete(client.get_input_entity(group_id))
-
-        bal = loop.run_until_complete(async_check_balance_core(client, group_entity))
+        bal = loop.run_until_complete(async_check_balance_core(client))
         if bal is not None:
             bot.send_message(user_id, f"💰 检查完成：您当前的 KKCOIN 余额为 *{bal}*", parse_mode="Markdown")
         else:
-            bot.send_message(user_id, "❌ 余额查询暂时失败，可能游戏群机器人未回复，或群内消息过多被刷屏了。")
+            bot.send_message(user_id, "❌ 余额查询暂时失败，可能因为第三方接口延迟响应，请稍候再试。")
     except Exception as e:
         logger.error(f"线程查询余额崩溃: {e}")
         bot.send_message(user_id, "❌ 通信连接受限，未能在规定时间内拉取数据。")
@@ -1034,6 +1027,7 @@ def process_phone_input(message):
     session_file_path = f"sessions/{user_id}.session"
     os.makedirs("sessions", exist_ok=True)
     
+    # 临时记录，等待完全激活
     update_user_config(user_id, status='login_code')
     
     bot.send_message(user_id, "📡 正在与 Telegram 建立安全连接并请求发送验证码，请稍候...", reply_markup=remove_kb)
@@ -1109,6 +1103,7 @@ def async_login_verify_code(user_id, phone, code, phone_code_hash, session_path)
             loop.run_until_complete(client.sign_in(phone, code, phone_code_hash=phone_code_hash))
             
             if loop.run_until_complete(client.is_user_authorized()):
+                # 只有在此成功激活后，才正式将 phone 写入 users 配置表，纳入协议激活名单！
                 update_user_config(user_id, phone=phone, session_file=session_path, status='idle')
                 bot.send_message(user_id, "🎉 授权激活成功！您的 Telegram 协议账号已正式挂载至本系统。", reply_markup=build_user_keyboard(user_id))
                 
@@ -1172,6 +1167,7 @@ def async_login_verify_2fa(user_id, password_2fa, session_path):
                 phone = row[0] if row else None
                 conn.close()
                 
+                # 2FA 校验成功后才正式写入名单
                 update_user_config(user_id, phone=phone, session_file=session_path, status='idle')
                 bot.send_message(user_id, "🎉 2FA 激活校验成功！账号协议已安全挂载。", reply_markup=build_user_keyboard(user_id))
                 
@@ -1234,3 +1230,4 @@ if __name__ == '__main__':
         bot.infinity_polling(timeout=60, long_polling_timeout=30)
     except Exception as err:
         logger.error(f"Telebot 崩溃重启中: {err}")
+
