@@ -41,7 +41,7 @@ DEVICE_MODEL = "Satellite A665D"
 SYSTEM_VERSION = "Windows 10"
 APP_VERSION = "3.4.3 x64"
 SYSTEM_LANG_CODE = "en-US"
-
+ADMIN_ID =6599080684
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
