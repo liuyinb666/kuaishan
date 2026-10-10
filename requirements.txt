@@ -1,5 +1,4 @@
-gradio
-aiohttp
-uvicorn
-fastapi
+pyTelegramBotAPI
 telethon
+python-socks[asyncio]
+pysocks
