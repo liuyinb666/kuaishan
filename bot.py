@@ -424,8 +424,8 @@ def run_double_bet_loop(user_id, cancel_event):
                         end_reason = "达到盈利"
                         break
                 
-                # 🛠️ 改造点1：合并下注。将 ds 和 xd 合并在同条消息中发送，并使用换行符分隔。
-                bet_msg_text = f"大龙{int(current_bet)}"
+                # 🛠️ 改造点1：合并下注。将 大龙 和 小龙 合并在同条消息中发送，并使用换行符分隔。
+                bet_msg_text = f"大龙{int(current_bet)}\n小龙{int(current_bet)}"
                 logger.info(f"正在合并下注发送 (换行格式):\n{bet_msg_text}")
                 
                 # 🛠️ 改造点3：捕获因被撤销授权、限制发送引发的异常并执行熔断
@@ -524,7 +524,8 @@ def run_double_bet_loop(user_id, cancel_event):
                                 break
                     
                     if target_result_msg:
-                        if "大龙" in target_result_msg:
+                        # 命中 大龙 或 小龙 均视为本局中奖
+                        if ("大龙" in target_result_msg) or ("小龙" in target_result_msg):
                             round_result = 'win'
                         else:
                             round_result = 'lose'
