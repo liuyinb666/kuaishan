@@ -12,9 +12,9 @@ from telethon import TelegramClient, events, Button
 from telethon.errors import SessionPasswordNeededError, PhoneCodeExpiredError, PhoneCodeInvalidError
 
 # ==================== 环境变量 ====================
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+API_ID = int(os.getenv("API_ID", "35171769"))
+API_HASH = os.getenv("API_HASH", "d8200395810a984bdd0ccd3d0712c4a8")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9183658573:AAFDBUrfjASDAYZnjiVqSJBy27F4b_Xagr4")
 API_URL = "https://yu28.top/api/kj.json?nbr=100"
 API_KEY = "yu28_0889c78ad74725b7"
 SESSIONS_DIR = "telegram_sessions"
