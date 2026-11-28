@@ -397,17 +397,72 @@ class SystemOrchestrator:
         ]
 
     # ---------- 扫码登录 ----------
+    @staticmethod
+    def _is_not_modified(e: Exception) -> bool:
+        name = type(e).__name__.lower()
+        msg = str(e).lower()
+        return "notmodified" in name or "not modified" in msg
+
+    async def _safe_edit(self, msg, text: str, buttons=None):
+        """改现成消息，改不动返回 False（绝不抛异常）。
+
+        注意：buttons=[] 在部分 Telethon 版本里不会清空旧按钮，所以只要文本
+        或按钮有一处对不上，就当作改不动处理，交给上层另发新消息。
+        """
+        if msg is None:
+            return False
+        try:
+            await msg.edit(text, buttons=buttons, parse_mode=None, link_preview=False)
+            return True
+        except Exception as e:
+            if self._is_not_modified(e):
+                logger.info("消息内容没变，视为已是最新")
+                return True
+            logger.warning(f"编辑消息失败（{type(e).__name__}: {e}）")
+            return False
+
+    async def _send_panel(self, u: UserState, text: str, buttons=None, file=None):
+        """发一条新消息；图片优先走 send_file，文本走 send_message。失败返回 None"""
+        try:
+            if file is not None:
+                try:
+                    file.seek(0)
+                except Exception:
+                    pass
+                return await self.bot.send_file(
+                    u.user_id, file, caption=text, buttons=buttons,
+                    parse_mode=None,
+                )
+            return await self.bot.send_message(
+                u.user_id, text, buttons=buttons, parse_mode=None, link_preview=False
+            )
+        except Exception as e:
+            logger.error(f"发送消息失败（{type(e).__name__}: {e}）")
+            return None
+
     async def _edit_or_send(self, u: UserState, msg, text: str, buttons=None, file=None):
-        """有现成消息就改它，改不动就另发一条"""
-        if msg is not None:
+        """有现成消息就改它，改不动就另发一条（永不抛异常）"""
+        if msg is not None and file is None:
+            cur = (getattr(msg, "raw_text", None) or getattr(msg, "text", None) or "")
+            same_text = cur.strip() == text.strip()
+            if not same_text and await self._safe_edit(msg, text, buttons=buttons):
+                return msg
+            if same_text:
+                # 文本一样，只把按钮刷一遍；清不掉按钮就重发一条干净的消息
+                if buttons is not None and await self._safe_edit(msg, text, buttons=buttons):
+                    return msg
+        elif msg is not None and file is not None:
+            # 带图编辑：先试原地换图，失败就删旧图重发
             try:
                 await msg.edit(text, buttons=buttons, file=file, parse_mode=None, link_preview=False)
                 return msg
             except Exception as e:
-                logger.warning(f"编辑消息失败，改发新消息: {e}")
-        return await self.bot.send_message(
-            u.user_id, text, buttons=buttons, file=file, parse_mode=None, link_preview=False
-        )
+                logger.warning(f"图片消息编辑失败，改为重发（{type(e).__name__}: {e}）")
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+        return await self._send_panel(u, text, buttons=buttons, file=file)
 
     async def _drop_user_client(self, u: UserState):
         """断开旧连接，避免同一个 session 文件被两个客户端同时占用"""
@@ -436,18 +491,31 @@ class SystemOrchestrator:
     async def _qr_send_panel(self, u: UserState, sess: QRSession):
         """把二维码画出来，贴到消息上（或更新已有消息）"""
         img = make_qr_image(sess.qr.url)
-        if img is None and sess.msg is not None:
-            # 没有二维码库时，别让旧图留在消息上误导人
-            try:
-                await sess.msg.delete()
-            except Exception:
-                pass
-            sess.msg = None
+        caption = self._qr_caption(sess.qr.url)
+        if img is None:
+            caption += (
+                "\n━━━━━━━━━━━━━━\n"
+                "❗ 这次没画出二维码图片：运行环境里缺二维码组件。\n"
+                "在控制台执行一次 pip install qrcode pillow，再重启机器人就有图了。"
+            )
         buttons = [
             [Button.inline("🔄 换一张码", data=b"qr_refresh")],
             [Button.inline("❌ 取消扫码", data=b"qr_cancel")]
         ]
-        sess.msg = await self._edit_or_send(u, sess.msg, self._qr_caption(sess.qr.url), buttons=buttons, file=img)
+        msg = sess.msg
+        has_photo = bool(getattr(msg, "photo", None)) if msg is not None else False
+        if msg is not None and img is not None and not has_photo:
+            # 手上这条只是「正在生成二维码」的文字消息，直接发一条新的图片消息更稳
+            try:
+                await msg.delete()
+            except Exception as e:
+                logger.info(f"删除占位消息失败（不影响继续）: {e}")
+            msg = None
+        sess.msg = await self._edit_or_send(u, msg, caption, buttons=buttons, file=img)
+        if sess.msg is None:
+            # 图片发不出去时，至少把说明和 tg:// 登录链接发出来
+            logger.error("二维码面板没发出去，退回文字面板")
+            sess.msg = await self._send_panel(u, caption, buttons=buttons)
 
     async def _qr_cleanup_msg(self, sess: QRSession):
         """销毁带登录 token 的消息，别留在聊天记录里"""
@@ -463,8 +531,10 @@ class SystemOrchestrator:
         await self.cancel_qr_login(sid, u)
         await self._drop_user_client(u)
 
-        panel_msg = await self._edit_or_send(
-            u, src_msg, "📷 正在生成二维码，稍等…",
+        # 这里不再原地编辑那条带按钮的旧消息：只要 Telegram 回一次「内容未改变」或超时，
+        # 整个回调就会中断，二维码永远出不来。直接发一条新消息最稳。
+        panel_msg = await self._send_panel(
+            u, "📷 正在生成二维码，稍等…",
             buttons=[[Button.inline("❌ 取消", data=b"qr_cancel")]]
         )
 
@@ -760,6 +830,17 @@ class SystemOrchestrator:
 
         @self.bot.on(events.CallbackQuery)
         async def handler_callback(event):
+            # 任何一步出错都不能让回调静默死掉，否则用户界面上就停在半截
+            try:
+                await _handle_callback(event)
+            except Exception as e:
+                logger.exception(f"处理按钮回调出错（{type(e).__name__}: {e}）")
+                try:
+                    await event.answer(f"操作出错：{type(e).__name__}，请再点一次", alert=True)
+                except Exception:
+                    pass
+
+        async def _handle_callback(event):
             sid = event.sender_id
             u = self.get_user_state(sid)
             data = event.data.decode() if isinstance(event.data, bytes) else event.data
@@ -861,8 +942,9 @@ class SystemOrchestrator:
 
             if data == "login_qr":
                 await event.answer("正在生成二维码…")
-                msg = await event.edit("📷 正在生成二维码，稍等…", buttons=[])
-                await self.start_qr_login(sid, u, src_msg=msg)
+                # 这里以前会在旧消息上原地编辑，Telegram 只要回一次「内容未改变」或超时，
+                # 整个回调就断在这里，二维码永远出不来。现在旧消息原样保留，直接开一条新的。
+                await self.start_qr_login(sid, u, src_msg=event.message)
                 return
 
             if data == "login_phone":
@@ -901,7 +983,17 @@ class SystemOrchestrator:
 
         @self.bot.on(events.NewMessage)
         async def handler_text(event):
-            if event.text.startswith("/"):
+            try:
+                await _handle_text(event)
+            except Exception as e:
+                logger.exception(f"处理文本消息出错（{type(e).__name__}: {e}）")
+                try:
+                    await event.respond(f"处理出错了：{type(e).__name__}，请再试一次")
+                except Exception:
+                    pass
+
+        async def _handle_text(event):
+            if not event.text or event.text.startswith("/"):
                 return
             sid = event.sender_id
             state = self.user_login_states.get(sid)
