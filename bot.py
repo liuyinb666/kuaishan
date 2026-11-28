@@ -421,6 +421,25 @@ class SystemOrchestrator:
             logger.warning(f"编辑消息失败（{type(e).__name__}: {e}）")
             return False
 
+    async def _cb_edit(self, event, text: str, buttons=None) -> bool:
+        """回调里原地改消息，改不动就返回 False（绝不抛异常）。
+
+        按钮回调里任何一次 event.edit 抛错都会让整条交互链断掉，
+        用户界面上就停在半截，所以这里统一兜一层。
+        """
+        try:
+            await event.edit(text, buttons=buttons)
+            return True
+        except Exception as e:
+            if self._is_not_modified(e):
+                try:
+                    await event.edit(buttons=buttons)
+                except Exception:
+                    pass
+                return True
+            logger.warning(f"回调里编辑消息失败（{type(e).__name__}: {e}）")
+            return False
+
     async def _send_panel(self, u: UserState, text: str, buttons=None, file=None):
         """发一条新消息；图片优先走 send_file，文本走 send_message。失败返回 None"""
         try:
@@ -526,7 +545,7 @@ class SystemOrchestrator:
             pass
         sess.msg = None
 
-    async def start_qr_login(self, sid: int, u: UserState, src_msg=None):
+    async def start_qr_login(self, sid: int, u: UserState):
         """发起扫码：连 Telegram → 取 token → 发二维码 → 后台等确认"""
         await self.cancel_qr_login(sid, u)
         await self._drop_user_client(u)
@@ -851,7 +870,8 @@ class SystemOrchestrator:
 
             if data == "back_main":
                 status = "开启" if u.broadcast_enabled else "关闭"
-                await event.edit(
+                await self._cb_edit(
+                    event,
                     f"📢 主控制面板\n"
                     f"--------------------\n"
                     f"报数状态: `{status}`\n"
@@ -863,7 +883,7 @@ class SystemOrchestrator:
                 return
 
             if data == "broadcast_settings":
-                await event.edit("报数设置", buttons=self.broadcast_settings_keyboard(u))
+                await self._cb_edit(event, "报数设置", buttons=self.broadcast_settings_keyboard(u))
                 return
 
             if data == "toggle_broadcast":
@@ -929,9 +949,10 @@ class SystemOrchestrator:
                             pass
                     u.client = None
                     u.save()
-                    await event.edit("已安全登出。", buttons=self.main_keyboard(u))
+                    await self._cb_edit(event, "已安全登出。", buttons=self.main_keyboard(u))
                 else:
-                    await event.edit(
+                    await self._cb_edit(
+                        event,
                         "🔑 选择登录方式\n"
                         "━━━━━━━━━━━━━━\n"
                         "📷 扫码登录：不用验证码，手机 TG 扫一下就好（推荐）\n"
@@ -941,17 +962,21 @@ class SystemOrchestrator:
                 return
 
             if data == "login_qr":
-                await event.answer("正在生成二维码…")
-                # 这里以前会在旧消息上原地编辑，Telegram 只要回一次「内容未改变」或超时，
-                # 整个回调就断在这里，二维码永远出不来。现在旧消息原样保留，直接开一条新的。
-                await self.start_qr_login(sid, u, src_msg=event.message)
+                # 这一步之前读 event.message，某些 Telethon 版本的回调对象根本没有这个属性，
+                # 直接抛 AttributeError，二维码那一段永远跑不到。改成完全不依赖它。
+                try:
+                    await event.answer("正在生成二维码…")
+                except Exception as e:
+                    logger.info(f"二维码按钮回执失败（不影响继续）: {type(e).__name__}: {e}")
+                await self.start_qr_login(sid, u)
                 return
 
             if data == "login_phone":
                 await self.cancel_qr_login(sid, u)
                 await self._drop_user_client(u)
                 self.user_login_states[sid] = "WAIT_PHONE"
-                await event.edit(
+                await self._cb_edit(
+                    event,
                     "📱 请输入手机号（带国家码，例：+8613800138000）\n发 /start 可取消",
                     buttons=[
                         [Button.inline("📷 换成扫码", data=b"login_qr")],
