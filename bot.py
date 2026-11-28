@@ -1,6 +1,8 @@
+import io
 import os
 import re
 import json
+import time
 import asyncio
 import logging
 import threading
@@ -12,9 +14,9 @@ from telethon import TelegramClient, events, Button
 from telethon.errors import SessionPasswordNeededError, PhoneCodeExpiredError, PhoneCodeInvalidError
 
 # ==================== 环境变量 ====================
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+API_ID = int(os.getenv("API_ID", "32989991"))
+API_HASH = os.getenv("API_HASH", "25c3648de034976670e6f3663211a1cc")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9183658573:AAFDBUrfjASDAYZnjiVqSJBy27F4b_Xagr4")
 API_URL = "https://yu28.top/api/kj.json?nbr=100"
 API_KEY = "yu28_0889c78ad74725b7"
 SESSIONS_DIR = "telegram_sessions"
@@ -25,6 +27,36 @@ os.makedirs(USER_DATA_DIR, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
+
+# ==================== 扫码登录参数 ====================
+QR_WAIT_SLICE = 12          # 单次等待秒数，到点检查一次要不要换新码
+QR_REFRESH_EVERY = 25       # 二维码最长存活秒数（Telegram 侧约 30 秒过期）
+QR_TOTAL_TIMEOUT = 300      # 整场扫码最长等待时间
+QR_CONNECT_TIMEOUT = 25     # 连接 Telegram 的超时
+
+
+def make_qr_image(data: str):
+    """把登录链接画成二维码，返回 BytesIO；没装 qrcode/pillow 时返回 None"""
+    try:
+        import qrcode
+        from qrcode.constants import ERROR_CORRECT_M
+        qr = qrcode.QRCode(version=None, error_correction=ERROR_CORRECT_M, box_size=11, border=3)
+        qr.add_data(data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        try:
+            img = img.convert("RGB")
+        except Exception:
+            pass
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        buf.name = "login_qr.png"
+        return buf
+    except Exception as e:
+        logger.warning(f"二维码图片生成失败（可 pip install qrcode pillow 补上）: {e}")
+        return None
+
 
 # ==================== 杀组预测算法 ====================
 ALL_TYPES = ['小双', '小单', '大双', '大单']
@@ -314,6 +346,21 @@ class UserState:
                 logger.error(f"用户 {self.user_id} 重连失败: {e}")
         return False
 
+# ==================== 扫码登录会话 ====================
+class QRSession:
+    """一次扫码登录的上下文"""
+
+    def __init__(self, sid: int, client, qr, msg=None):
+        self.sid = sid
+        self.client = client
+        self.qr = qr
+        self.msg = msg
+        self.task = None
+        self.cancelled = False
+        self.force_refresh = False
+        self.last_refresh = time.monotonic()
+
+
 # ==================== 系统调度器 ====================
 class SystemOrchestrator:
     def __init__(self):
@@ -324,6 +371,7 @@ class SystemOrchestrator:
             self.bot = TelegramClient("telegram_sessions/bot_master", API_ID, API_HASH)
         self.users = {}
         self.user_login_states = {}
+        self.qr_sessions = {}
         self.last_issue_id = None
 
     def get_user_state(self, uid):
@@ -340,6 +388,267 @@ class SystemOrchestrator:
             [Button.inline(f"⏱ 投递延迟: {u.custom_delay}s", data=b"set_delay")],
             [Button.inline("📖 使用说明", data=b"mode_intro")]
         ]
+
+    def login_method_keyboard(self):
+        return [
+            [Button.inline("📷 扫码登录（推荐 · 免验证码）", data=b"login_qr")],
+            [Button.inline("📱 手机号 + 验证码", data=b"login_phone")],
+            [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
+        ]
+
+    # ---------- 扫码登录 ----------
+    async def _edit_or_send(self, u: UserState, msg, text: str, buttons=None, file=None):
+        """有现成消息就改它，改不动就另发一条"""
+        if msg is not None:
+            try:
+                await msg.edit(text, buttons=buttons, file=file, parse_mode=None, link_preview=False)
+                return msg
+            except Exception as e:
+                logger.warning(f"编辑消息失败，改发新消息: {e}")
+        return await self.bot.send_message(
+            u.user_id, text, buttons=buttons, file=file, parse_mode=None, link_preview=False
+        )
+
+    async def _drop_user_client(self, u: UserState):
+        """断开旧连接，避免同一个 session 文件被两个客户端同时占用"""
+        if getattr(u, "client", None):
+            try:
+                await u.client.disconnect()
+            except Exception:
+                pass
+        u.client = None
+
+    def _qr_caption(self, qr_url: str) -> str:
+        token = qr_url.split("token=", 1)[-1]
+        return (
+            "🔑 扫码登录\n"
+            "━━━━━━━━━━━━━━\n"
+            "1. 手机打开 Telegram（要登哪个号就用哪个号）\n"
+            "2. 设置 → 设备 → 关联桌面设备 → 扫描二维码\n"
+            "3. 扫上面这张码，手机上点「确认登录」\n"
+            "━━━━━━━━━━━━━━\n"
+            f"⏳ 二维码每 {QR_REFRESH_EVERY} 秒自动换新，这条消息跟着刷新\n"
+            f"💡 扫不动就把下面这条复制到手机 TG 里点开：\n"
+            f"tg://login?token={token}\n"
+            f"⌛ 整场 {QR_TOTAL_TIMEOUT // 60} 分钟内有效"
+        )
+
+    async def _qr_send_panel(self, u: UserState, sess: QRSession):
+        """把二维码画出来，贴到消息上（或更新已有消息）"""
+        img = make_qr_image(sess.qr.url)
+        if img is None and sess.msg is not None:
+            # 没有二维码库时，别让旧图留在消息上误导人
+            try:
+                await sess.msg.delete()
+            except Exception:
+                pass
+            sess.msg = None
+        buttons = [
+            [Button.inline("🔄 换一张码", data=b"qr_refresh")],
+            [Button.inline("❌ 取消扫码", data=b"qr_cancel")]
+        ]
+        sess.msg = await self._edit_or_send(u, sess.msg, self._qr_caption(sess.qr.url), buttons=buttons, file=img)
+
+    async def _qr_cleanup_msg(self, sess: QRSession):
+        """销毁带登录 token 的消息，别留在聊天记录里"""
+        try:
+            if sess.msg is not None:
+                await sess.msg.delete()
+        except Exception:
+            pass
+        sess.msg = None
+
+    async def start_qr_login(self, sid: int, u: UserState, src_msg=None):
+        """发起扫码：连 Telegram → 取 token → 发二维码 → 后台等确认"""
+        await self.cancel_qr_login(sid, u)
+        await self._drop_user_client(u)
+
+        panel_msg = await self._edit_or_send(
+            u, src_msg, "📷 正在生成二维码，稍等…",
+            buttons=[[Button.inline("❌ 取消", data=b"qr_cancel")]]
+        )
+
+        client = None
+        try:
+            client = TelegramClient(os.path.join(SESSIONS_DIR, f"user_{sid}"), API_ID, API_HASH)
+            await asyncio.wait_for(client.connect(), timeout=QR_CONNECT_TIMEOUT)
+
+            if await client.is_user_authorized():
+                u.client = client
+                u.is_logged_in = True
+                u.save()
+                await self._edit_or_send(u, panel_msg, "这个账号已经是登录状态，不用再扫码了。", buttons=self.main_keyboard(u))
+                return
+
+            qr = await client.qr_login()
+        except Exception as e:
+            logger.error(f"发起扫码失败: {e}")
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+            await self._edit_or_send(
+                u, panel_msg,
+                f"❌ 发起扫码失败：{e}\n\n多半是这台机器连不上 Telegram，检查网络或代理后再试。",
+                buttons=[
+                    [Button.inline("📷 重试扫码", data=b"login_qr")],
+                    [Button.inline("📱 手机号登录", data=b"login_phone")],
+                    [Button.inline("⬅️ 主菜单", data=b"back_main")]
+                ]
+            )
+            return
+
+        sess = QRSession(sid, client, qr, msg=panel_msg)
+        self.qr_sessions[sid] = sess
+        self.user_login_states[sid] = "WAIT_QR"
+        await self._qr_send_panel(u, sess)
+        sess.task = asyncio.create_task(self._qr_login_loop(u, sess))
+        logger.info(f"用户 {sid} 发起扫码登录")
+
+    async def _qr_login_loop(self, u: UserState, sess: QRSession):
+        """后台等手机端确认；token 到期就自动换新码"""
+        sid = sess.sid
+        deadline = time.monotonic() + QR_TOTAL_TIMEOUT
+        try:
+            while not sess.cancelled:
+                remain = deadline - time.monotonic()
+                if remain <= 0:
+                    await self._qr_fail(u, sess, "二维码超时了，一直没收到手机端的确认")
+                    return
+                try:
+                    await sess.qr.wait(timeout=min(QR_WAIT_SLICE, remain))
+                except asyncio.TimeoutError:
+                    now = time.monotonic()
+                    if sess.force_refresh or (now - sess.last_refresh) >= QR_REFRESH_EVERY:
+                        sess.force_refresh = False
+                        sess.last_refresh = now
+                        try:
+                            if hasattr(sess.qr, "recreate"):
+                                await sess.qr.recreate()
+                            else:
+                                # 老版本 Telethon 没有 recreate，直接重新走一次 qr_login
+                                sess.qr = await sess.client.qr_login()
+                        except Exception as e:
+                            logger.error(f"二维码刷新失败: {e}")
+                            await self._qr_fail(u, sess, f"二维码刷新失败：{e}")
+                            return
+                        await self._qr_send_panel(u, sess)
+                    continue
+                except SessionPasswordNeededError:
+                    # 扫码通过，但账号开了两步验证
+                    u.client = sess.client
+                    u.is_logged_in = False
+                    u.save()
+                    self.qr_sessions.pop(sid, None)
+                    self.user_login_states[sid] = "WAIT_2FA"
+                    await self._qr_cleanup_msg(sess)
+                    await self.bot.send_message(
+                        u.user_id,
+                        "🔐 手机端已确认，但这个账号开了两步验证\n请直接把两步验证密码发过来：",
+                        buttons=[[Button.inline("⬅️ 主菜单", data=b"back_main")]]
+                    )
+                    return
+                except Exception as e:
+                    logger.error(f"扫码登录失败: {e}")
+                    await self._qr_fail(u, sess, f"登录失败：{e}")
+                    return
+                else:
+                    await self._qr_success(u, sess)
+                    return
+        except asyncio.CancelledError:
+            logger.info(f"用户 {sid} 的扫码任务已取消")
+            raise
+        except Exception as e:
+            logger.error(f"用户 {sid} 扫码任务异常: {e}")
+            try:
+                await self._qr_fail(u, sess, f"扫码过程出错：{e}")
+            except Exception:
+                pass
+
+    async def _qr_success(self, u: UserState, sess: QRSession):
+        sid = sess.sid
+        me = None
+        try:
+            me = await sess.client.get_me()
+        except Exception as e:
+            logger.warning(f"取登录账号信息失败: {e}")
+
+        self.qr_sessions.pop(sid, None)
+        self.user_login_states.pop(sid, None)
+        await self._qr_cleanup_msg(sess)
+
+        u.client = sess.client
+        u.is_logged_in = True
+        phone = getattr(me, "phone", None) if me else None
+        if phone:
+            phone = str(phone)
+            u.phone = phone if phone.startswith("+") else "+" + phone
+        u.save()
+
+        who = ""
+        if me:
+            name = " ".join(x for x in [me.first_name, me.last_name] if x)
+            who = name + (f"（@{me.username}）" if me.username else "")
+        try:
+            await self.bot.send_message(
+                u.user_id,
+                f"✅ 扫码登录成功\n登录账号：{who or '已登录'}\n\n接着去「📢 报数设置」里绑定播报频道就行。",
+                buttons=self.main_keyboard(u)
+            )
+        except Exception as e:
+            logger.warning(f"通知用户 {sid} 登录成功失败: {e}")
+        logger.info(f"用户 {sid} 扫码登录成功")
+
+    async def _qr_fail(self, u: UserState, sess: QRSession, reason: str):
+        sid = sess.sid
+        sess.cancelled = True
+        self.qr_sessions.pop(sid, None)
+        self.user_login_states.pop(sid, None)
+        try:
+            await sess.client.disconnect()
+        except Exception:
+            pass
+        if u.client is sess.client:
+            u.client = None
+        await self._qr_cleanup_msg(sess)
+        try:
+            await self.bot.send_message(
+                u.user_id,
+                f"❌ {reason}\n\n要重试点下面的按钮：",
+                buttons=[
+                    [Button.inline("📷 重新扫码", data=b"login_qr")],
+                    [Button.inline("📱 手机号登录", data=b"login_phone")],
+                    [Button.inline("⬅️ 主菜单", data=b"back_main")]
+                ]
+            )
+        except Exception as e:
+            logger.warning(f"通知用户 {sid} 扫码失败结果时出错: {e}")
+        logger.info(f"用户 {sid} 扫码登录结束：{reason}")
+
+    async def cancel_qr_login(self, sid: int, u: UserState, notify: bool = False) -> bool:
+        sess = self.qr_sessions.pop(sid, None)
+        if not sess:
+            return False
+        sess.cancelled = True
+        if sess.task and not sess.task.done():
+            sess.task.cancel()
+            try:
+                await sess.task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        try:
+            await sess.client.disconnect()
+        except Exception:
+            pass
+        if u.client is sess.client:
+            u.client = None
+        await self._qr_cleanup_msg(sess)
+        if notify:
+            await self.bot.send_message(u.user_id, "已取消扫码登录。", buttons=self.login_method_keyboard())
+        return True
 
     def broadcast_settings_keyboard(self, u: UserState):
         enabled = "✅ " if u.broadcast_enabled else "⬜ "
@@ -428,6 +737,16 @@ class SystemOrchestrator:
         @self.bot.on(events.NewMessage(pattern="/start"))
         async def handler_start(event):
             u = self.get_user_state(event.sender_id)
+            prev_state = self.user_login_states.pop(event.sender_id, None)
+            await self.cancel_qr_login(event.sender_id, u)
+            # 手机号/2FA 走到一半放弃的，别把半连接挂着占住 session 文件
+            if prev_state in ("WAIT_PHONE", "WAIT_CODE", "WAIT_2FA") and not u.is_logged_in:
+                if u.client:
+                    try:
+                        await u.client.disconnect()
+                    except Exception:
+                        pass
+                u.client = None
             status = "开启" if u.broadcast_enabled else "关闭"
             await event.respond(
                 f"📢 PC28 报数机器人\n"
@@ -511,6 +830,8 @@ class SystemOrchestrator:
                     "本机器人提供基于区间优化的杀组预测。\n"
                     "算法原理：根据期号生成伪随机数，结合区间缩放，计算下一期和值，再根据序列规则推导杀组。\n"
                     "每期自动从历史最近27期中回测所有区间，选用命中率最高的区间进行预测。\n"
+                    "登录：主菜单 → 🔑 登录协议号 → 📷 扫码登录，手机 TG 扫一下即可。\n"
+                    "（+86 号码经常收不到短信，优先用扫码）\n"
                     "开启报数时清空历史，从当前最新期开始播报，历史记录最多保留20期。",
                     alert=True
                 )
@@ -518,14 +839,64 @@ class SystemOrchestrator:
 
             if data == "login":
                 if u.is_logged_in:
+                    await self.cancel_qr_login(sid, u)
                     u.is_logged_in = False
                     if u.client:
-                        await u.client.disconnect()
+                        try:
+                            await u.client.disconnect()
+                        except Exception:
+                            pass
+                    u.client = None
                     u.save()
                     await event.edit("已安全登出。", buttons=self.main_keyboard(u))
                 else:
-                    self.user_login_states[sid] = "WAIT_PHONE"
-                    await event.respond("请发送您的 Telegram 手机号:")
+                    await event.edit(
+                        "🔑 选择登录方式\n"
+                        "━━━━━━━━━━━━━━\n"
+                        "📷 扫码登录：不用验证码，手机 TG 扫一下就好（推荐）\n"
+                        "📱 手机号登录：走短信验证码，+86 号码经常收不到",
+                        buttons=self.login_method_keyboard()
+                    )
+                return
+
+            if data == "login_qr":
+                await event.answer("正在生成二维码…")
+                msg = await event.edit("📷 正在生成二维码，稍等…", buttons=[])
+                await self.start_qr_login(sid, u, src_msg=msg)
+                return
+
+            if data == "login_phone":
+                await self.cancel_qr_login(sid, u)
+                await self._drop_user_client(u)
+                self.user_login_states[sid] = "WAIT_PHONE"
+                await event.edit(
+                    "📱 请输入手机号（带国家码，例：+8613800138000）\n发 /start 可取消",
+                    buttons=[
+                        [Button.inline("📷 换成扫码", data=b"login_qr")],
+                        [Button.inline("⬅️ 主菜单", data=b"back_main")]
+                    ]
+                )
+                return
+
+            if data == "qr_cancel":
+                ok = await self.cancel_qr_login(sid, u)
+                await event.answer("已取消" if ok else "没有正在进行的扫码")
+                if ok:
+                    await self.bot.send_message(u.user_id, "已取消扫码登录。", buttons=self.login_method_keyboard())
+                else:
+                    try:
+                        await event.edit("已取消扫码登录。", buttons=self.login_method_keyboard())
+                    except Exception:
+                        pass
+                return
+
+            if data == "qr_refresh":
+                sess = self.qr_sessions.get(sid)
+                if not sess:
+                    await event.answer("二维码已失效，请重新发起", alert=True)
+                    return
+                sess.force_refresh = True
+                await event.answer(f"正在换新码，{QR_WAIT_SLICE} 秒内刷新")
                 return
 
         @self.bot.on(events.NewMessage)
@@ -538,15 +909,33 @@ class SystemOrchestrator:
 
             if state == "WAIT_PHONE":
                 u.phone = event.text.strip()
+                client = None
                 try:
+                    await self._drop_user_client(u)
                     client = TelegramClient(os.path.join(SESSIONS_DIR, f"user_{sid}"), API_ID, API_HASH)
-                    await client.connect()
+                    await asyncio.wait_for(client.connect(), timeout=QR_CONNECT_TIMEOUT)
                     req = await client.send_code_request(u.phone)
                     u.client, u.temp_phone_code_hash = client, req.phone_code_hash
                     self.user_login_states[sid] = "WAIT_CODE"
-                    await event.respond("验证码已发送，请输入:")
+                    await event.respond(
+                        "验证码已发出，请直接发给我：\n"
+                        "（+86 号码收不到就看这里：先试扫码登录，比短信稳）",
+                        buttons=[[Button.inline("📷 改用扫码", data=b"login_qr")]]
+                    )
                 except Exception as e:
-                    await event.respond(f"发送验证码失败: {e}")
+                    if client is not None:
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
+                    u.client = None
+                    await event.respond(
+                        f"发送验证码失败: {e}\n\n+86 号码经常被运营商拦，建议改用扫码登录。",
+                        buttons=[
+                            [Button.inline("📷 扫码登录", data=b"login_qr")],
+                            [Button.inline("⬅️ 主菜单", data=b"back_main")]
+                        ]
+                    )
                     self.user_login_states.pop(sid, None)
             elif state == "WAIT_CODE":
                 code = event.text.strip()
@@ -574,6 +963,11 @@ class SystemOrchestrator:
                     await event.respond("2FA 验证通过，登录成功!", buttons=self.main_keyboard(u))
                 except Exception as e:
                     await event.respond(f"密码错误: {e}")
+            elif state == "WAIT_QR":
+                await event.respond(
+                    "正在等手机端确认扫码 👀\n"
+                    "要取消就点二维码下面那个「❌ 取消扫码」。"
+                )
             elif state == "WAIT_BROADCAST_CHANNEL":
                 u.broadcast_channel = event.text.strip()
                 u.save()
